@@ -146,7 +146,7 @@ MCP Parameters:
       default limit)."
   (org-wiki-mcp--with-error-handling
     (json-encode
-     (org-wiki--search query (org-wiki-mcp--parse-k k)))))
+     (vconcat (org-wiki--search query (org-wiki-mcp--parse-k k))))))
 
 (defun org-wiki-mcp--parse-k (k)
   "Return a sane result limit from the wire-level K value.

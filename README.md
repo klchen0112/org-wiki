@@ -56,7 +56,7 @@ edits.
 
 This repository implements the read-only surface of the wiki. It does
 not yet implement source ingest, node creation, node mutation, lint
-repair, transaction logging, raw artifact registration, embedding sync,
+repair, transaction logging, raw artifact registration, source embedding pipelines,
 or recovery. Those are mutation-side concerns described in the
 architecture document.
 
@@ -64,6 +64,7 @@ What is implemented here:
 
 - wiki-node identity and discovery
 - semantic-first search with literal fallback
+- optional, default-off qmd search with node caches and explicit index maintenance
 - node body reads by ID
 - metadata reads with tool-maintained hash properties stripped
 - backlink reads through org-roam
@@ -120,7 +121,7 @@ the canonical heading ID so callers learn what to cite next time.
 
 ## Implementation
 
-The package is split into five modules.
+The package is split into six modules.
 
 | File | Role |
 | --- | --- |
@@ -129,6 +130,7 @@ The package is split into five modules.
 | `org-wiki-mcp.el` | Read-only MCP tool registration around the data core. |
 | `org-wiki-commands.el` | Interactive Emacs commands with optional consult previews and embark actions. |
 | `org-wiki-gptel.el` | Direct gptel tools, the `org-wiki` preset, `org-wiki-ask`, and `org-wiki-chat`. |
+| `org-wiki-qmd.el` | Optional qmd CLI adapter, node caches, index maintenance, and recovery. |
 
 ### Search
 
@@ -142,9 +144,91 @@ search over headings and body text. This keeps the tools useful when an
 embedding service is down and keeps literal hits from disappearing
 behind a failed semantic path.
 
+Set `org-wiki-search-backend` to `auto` (the default), `qmd`,
+`org-ql-semantic`, or `text`. In `auto`, enabling qmd adds it before the
+existing semantic/literal chain. Explicit `qmd` falls back directly to
+literal search. Empty queries use literal discovery.
+
 Candidate discovery unions files under `org-wiki-root` with org-roam DB
 entries whose properties include `WIKI_KIND`, so property-based identity
 is honored across the corpus.
+
+### Optional qmd search
+
+qmd is an optional external program. Search is disabled by default and
+ordinary installation and tests do not need it. The adapter supports the
+verified qmd **2.8.3** CLI contract. Install that version separately, then
+load the integration and choose a dedicated collection:
+
+```elisp
+(require 'org-wiki-qmd)
+(setq org-wiki-qmd-collection "wiki")
+```
+
+The default sync scope requires a working org-roam database as well as
+`org-wiki-root`. If you only want files under the root, explicitly set
+`org-wiki-qmd-discovery-scope` to `root-only` before syncing.
+
+1. Save your Org buffers, then run `M-x org-wiki-qmd-setup`.
+2. Run `M-x org-wiki-qmd-sync` to index saved wiki headings.
+3. Enable search with the following configuration:
+
+```elisp
+(setq org-wiki-search-backend 'auto
+      org-wiki-qmd-enabled t)
+```
+
+Run `M-x org-wiki-qmd-status` to check readiness, then use the existing
+Emacs command, MCP tool, or gptel tool. Keyword mode (`search`) needs no
+models. Results point to original Org nodes and return canonical IDs.
+Summary extraction respects each node's heading level and excludes
+nested wiki nodes.
+
+To disable qmd search immediately for subsequent queries, use:
+
+```elisp
+(setq org-wiki-qmd-enabled nil)
+```
+
+Disabled searches never start qmd, including when the selected backend is
+`qmd`. Existing caches remain available for later use. Explicit setup,
+sync, and embed commands still work while search is disabled; they do
+not enable search themselves. A prefix argument to `org-wiki-search`
+always bypasses external backends.
+
+Indexes are derived data in a cache isolated by knowledge-base identity.
+Sync never changes Org source files and rejects unsaved candidate buffers.
+Discovery failures preserve existing caches. Interrupted updates remain
+unready across restarts; run sync again to recover. Maintenance is locked
+across Emacs instances. If a lock belongs to another host or its owner
+cannot be verified, inspect the reported lock directory before removing
+it; do not remove a lock while its owner or qmd children are running.
+If the launcher exits while its children are still running, maintenance
+keeps the lock. Retry after those children finish; the lock can then be
+reclaimed without restarting Emacs.
+
+Sync is manual: stale hits are filtered, but new or externally edited
+content may not be recalled until you sync again. Run sync after adding,
+moving, deleting, or changing wiki nodes. Node-level diagnostics report
+missing and duplicate IDs rather than editing them.
+
+For `vsearch`, set `org-wiki-qmd-models` to a plist containing `:embed`
+and `:generate`, both absolute paths to predownloaded local GGUF models.
+qmd uses the generation model to expand vector queries. For hybrid
+`query`, also provide a `:rerank` local path. Then run
+`M-x org-wiki-qmd-embed` and set `org-wiki-qmd-search-mode` to the desired
+mode. Searches never download models; missing or changed model files
+cause fallback. Embedding maintenance itself only requires `:embed`.
+Replacing a configured model, even at the same path, makes the next
+embed rebuild vectors. Interrupted embedding also requires a rebuild.
+Sync conservatively invalidates vector readiness, so run embed again
+after syncing; unchanged models allow incremental embedding.
+The search timeout defaults to 10 seconds;
+CPU-only hybrid queries may need a higher
+`org-wiki-qmd-search-timeout`.
+
+The CLI contract and real output fixture are recorded in
+[`docs/qmd-cli-contract.md`](docs/qmd-cli-contract.md).
 
 ### Reads
 
@@ -318,7 +402,7 @@ surface:
 - write-ahead logging, crash recovery, file locks, and transaction
   replay
 - hash refresh and tamper-evidence on mutation
-- embedding queue maintenance and sync repair
+- source embedding queues and automatic synchronization
 - privacy/read filtering beyond the `:WIKI_KIND:` read predicate
 - publication workflows
 
@@ -341,6 +425,8 @@ Common targets:
 | --- | --- |
 | `make build` | Byte-compile package and tests with warnings as errors. |
 | `make test` | Run the ERT suite. |
+| `make test-qmd-integration` | Check the real qmd 2.8.3 CLI in isolated temporary indexes, without models. |
+| `make test-qmd-semantic` | Also check real vector and hybrid search using predownloaded models. |
 | `make lint` | Run checkdoc, package-lint, relint, and check-declare. |
 | `make format` | Format Elisp, shell scripts, and Nix files. |
 | `make format-check` | Verify formatting without modifying files. |
@@ -357,6 +443,12 @@ nix develop --command lefthook install
 
 GitHub Actions runs `nix flake check`, `nix build`, and report
 generation for coverage and benchmarks.
+
+The optional semantic check reads absolute model paths from
+`ORG_WIKI_QMD_EMBED_MODEL`, `ORG_WIKI_QMD_GENERATE_MODEL`, and
+`ORG_WIKI_QMD_RERANK_MODEL`. Neither real qmd target runs as part of
+`make check`; the regular suite uses a controlled CLI adapter and small
+local process fixtures.
 
 ## License
 

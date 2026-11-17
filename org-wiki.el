@@ -68,6 +68,7 @@
 (require 'cl-lib)
 (require 'org)
 (require 'org-id)
+(require 'org-element)
 (require 'seq)
 (require 'subr-x)
 
@@ -85,6 +86,7 @@
 (declare-function org-ql-semantic--match-score "ext:org-ql-semantic")
 (declare-function org-hash-property "ext:org-hash")
 (declare-function org-roam-db-query "org-roam-db")
+(declare-function org-wiki-qmd--search "org-wiki-qmd" (query k))
 (defvar org-roam-db-location)
 
 (defgroup org-wiki nil
@@ -111,6 +113,25 @@ A node is a wiki node only if it lives under this directory AND has a
   "Default `k' (max results) for `org-wiki--search'."
   :type 'integer
   :group 'org-wiki)
+
+(defcustom org-wiki-search-backend 'auto
+  "Search backend: auto, qmd, org-ql-semantic, or text.
+Auto tries enabled qmd search, then semantic search, then literal search.
+Explicit qmd falls back directly to literal search."
+  :type '(choice (const auto) (const qmd) (const org-ql-semantic)
+                 (const text))
+  :group 'org-wiki)
+
+(defcustom org-wiki-qmd-enabled nil
+  "Whether searches may use the optional qmd backend.
+Changing this option starts no processes and preserves existing indexes.
+Explicit maintenance commands work even when search is disabled."
+  :type 'boolean
+  :group 'org-wiki)
+
+(defvar org-wiki-qmd-last-error nil
+  "Most recent qmd failure or reason for skipping qmd search.
+This diagnostic is local to Emacs and is not part of tool results.")
 
 (defcustom org-wiki-id-refresh-interval 300
   "Minimum seconds between cold-path `org-id-update-id-locations' calls.
@@ -308,20 +329,59 @@ Properties returned: :id :title :kind :file :summary."
     (list :id id :title title :kind kind :file file
           :summary (org-wiki--extract-summary))))
 
+(defvar-local org-wiki--summary-cache nil
+  "Summary cache for the current buffer modification tick.")
+
 (defun org-wiki--extract-summary ()
-  "Return the body of the `** Summary' subheading of the wiki node at point.
-Empty string if no such subheading exists."
-  (save-restriction
-    (org-narrow-to-subtree)
-    (save-excursion
-      (goto-char (point-min))
-      (if (re-search-forward "^\\*\\* Summary[ \t]*$" nil t)
-          (let ((start (progn (forward-line) (point)))
-                (end   (or (and (re-search-forward "^\\*\\* " nil t)
-                                (match-beginning 0))
-                           (point-max))))
-            (string-trim (buffer-substring-no-properties start end)))
-        ""))))
+  "Return the wiki node's direct Summary body, cached until text changes."
+  (let* ((tick (buffer-chars-modified-tick))
+         (key (list (point) (point-min) (point-max))))
+    (unless (eq tick (car org-wiki--summary-cache))
+      (setq org-wiki--summary-cache (cons tick (make-hash-table :test #'equal))))
+    (let* ((table (cdr org-wiki--summary-cache))
+           (cached (gethash key table)))
+      (or cached
+          (puthash key (org-wiki--compute-summary) table)))))
+
+(defun org-wiki--compute-summary ()
+  "Return the first ordinary, direct Summary child's body at point.
+Respect the wiki node's level and exclude nested wiki subtrees.
+Return an empty string when no such child exists."
+  (save-excursion
+    (save-restriction
+      (org-narrow-to-subtree)
+      (let ((level (1+ (org-outline-level))))
+        (or (org-element-map (org-element-parse-buffer 'headline) 'headline
+              (lambda (heading)
+                (when (and (= level (org-element-property :level heading))
+                           (equal "Summary" (org-element-property :raw-value heading))
+                           (not (org-entry-get
+                                 (org-element-property :begin heading) "WIKI_KIND")))
+                  (string-trim
+                   (org-wiki--owned-region-text
+                    (save-excursion
+                      (goto-char (org-element-property :begin heading))
+                      (forward-line) (point))
+                    (org-element-property :end heading)))))
+              nil t)
+            "")))))
+
+(defun org-wiki--owned-region-text (begin end)
+  "Return text from BEGIN to END, excluding any wiki subtrees in it.
+The region must begin at a line boundary in an Org buffer."
+  (save-excursion
+    (save-restriction
+      (narrow-to-region begin end)
+      (let ((cursor begin) pieces)
+        (org-element-map (org-element-parse-buffer 'headline) 'headline
+          (lambda (heading)
+            (let ((start (org-element-property :begin heading)))
+              (when (and (>= start cursor)
+                         (org-entry-get start "WIKI_KIND"))
+                (push (buffer-substring-no-properties cursor start) pieces)
+                (setq cursor (org-element-property :end heading))))))
+        (push (buffer-substring-no-properties cursor end) pieces)
+        (apply #'concat (nreverse pieces))))))
 
 ;;;; --- Discovery tools --------------------------------------------
 
@@ -356,27 +416,34 @@ though a later in-session load is still picked up via `fboundp'."
   "Search wiki nodes for QUERY, returning up to K (default 10) plists.
 Each result has keys :id :title :kind :file :summary.
 
-When the org-ql-semantic library is available — already loaded, or
-loadable from `load-path' — the search is semantic-first and results
-are ordered by similarity.  If the semantic backend errors —
-org-ql-semantic signals rather than degrading when its CLI or
-embedding server is down — or is absent, or returns no matches, the
-search falls back to a literal string match against `org-ql''s
-`heading' / `regexp' predicates, in corpus-traversal order with no
-relevance ranking."
+Use `org-wiki-search-backend' and `org-wiki-qmd-enabled' to select
+backends.  Errors and empty results fall through to the next backend.
+An empty QUERY uses literal discovery.  User quits always propagate."
   (require 'org-ql)
   (let* ((k (or k org-wiki-default-search-limit))
          (files (org-wiki--candidate-files))
+         (qmd
+          (when (and (not (string-empty-p query))
+                     (memq org-wiki-search-backend '(auto qmd)))
+            (if (not org-wiki-qmd-enabled)
+                (progn (setq org-wiki-qmd-last-error "Search disabled") nil)
+              (condition-case err
+                  (progn (require 'org-wiki-qmd)
+                         (org-wiki-qmd--search query k))
+                (error (setq org-wiki-qmd-last-error
+                             (error-message-string err)) nil)))))
          (semantic
           (condition-case nil
-              (when (org-wiki--semantic-available-p)
+              (when (and (not qmd) (not (string-empty-p query))
+                         (memq org-wiki-search-backend '(auto org-ql-semantic))
+                         (org-wiki--semantic-available-p))
                 (org-wiki--semantic-search query files))
             ;; Degraded mode: backend down or misconfigured.
             (error nil))))
     ;; An empty semantic result (no error signaled) also falls through
     ;; to the literal fallback: a paraphrase the embedding misses must
     ;; never beat a query that literal matching would have answered.
-    (seq-take (or semantic (org-wiki--text-search query files)) k)))
+    (seq-take (or qmd semantic (org-wiki--text-search query files)) k)))
 
 (defun org-wiki--semantic-search (query files)
   "Return wiki-node summaries for QUERY from FILES, best match first.

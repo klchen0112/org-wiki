@@ -129,6 +129,8 @@ ITERATION, OP and INPUT annotate any failure report."
   "Run the fuzzing harness; exit non-zero on contract violations."
   (random org-wiki-fuzz-seed)
   (let* ((org-id-locations (make-hash-table :test 'equal))
+         (org-wiki-search-backend 'org-ql-semantic)
+         (org-wiki-qmd-enabled nil)
          (org-wiki--id-last-refresh 0)
          (root (org-wiki-fuzz--setup))
          (org-wiki-root (file-name-as-directory root))

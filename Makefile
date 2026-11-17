@@ -7,8 +7,8 @@
 EMACS ?= emacs
 BATCH := $(EMACS) -Q --batch -L .
 
-PKG_FILES   := org-wiki.el org-wiki-health.el org-wiki-mcp.el org-wiki-commands.el org-wiki-gptel.el
-TEST_FILES  := org-wiki-test.el org-wiki-commands-test.el org-wiki-gptel-test.el
+PKG_FILES   := org-wiki.el org-wiki-health.el org-wiki-mcp.el org-wiki-commands.el org-wiki-gptel.el org-wiki-qmd.el
+TEST_FILES  := org-wiki-test.el org-wiki-commands-test.el org-wiki-gptel-test.el org-wiki-qmd-test.el
 SCRIPT_EL   := $(wildcard scripts/*.el)
 SH_FILES    := $(wildcard scripts/*.sh)
 NIX_FILES   := $(wildcard *.nix)
@@ -29,6 +29,14 @@ build:
 test:
 	$(BATCH) $(addprefix -l ,$(PKG_FILES)) $(addprefix -l ,$(TEST_FILES)) \
 	  -f ert-run-tests-batch-and-exit
+
+# Optional real CLI contract checks.  Neither target is part of offline check.
+.PHONY: test-qmd-integration test-qmd-semantic
+test-qmd-integration:
+	$(BATCH) -l scripts/qmd-integration.el
+
+test-qmd-semantic:
+	ORG_WIKI_QMD_SEMANTIC=1 $(BATCH) -l scripts/qmd-integration.el
 
 # --- Lint ------------------------------------------------------------
 

@@ -1,0 +1,10 @@
+[
+  {
+    "docid": "#a56d08",
+    "score": 0,
+    "file": "qmd://wiki/ddc9e669194254cef019a29d3619a2c16592e5d52e1a81e98b01bd52319149a3.md?index=wiki-test",
+    "line": 6,
+    "title": "Child",
+    "snippet": "@@ -5,3 @@ (4 before, 0 after)\n## Summary\nChild secret keyword.\n"
+  }
+]

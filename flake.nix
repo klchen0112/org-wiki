@@ -72,6 +72,7 @@
               ./org-wiki-mcp.el
               ./org-wiki-commands.el
               ./org-wiki-gptel.el
+              ./org-wiki-qmd.el
             ];
           };
 
@@ -83,9 +84,11 @@
               ./org-wiki-mcp.el
               ./org-wiki-commands.el
               ./org-wiki-gptel.el
+              ./org-wiki-qmd.el
               ./org-wiki-test.el
               ./org-wiki-commands-test.el
               ./org-wiki-gptel-test.el
+              ./org-wiki-qmd-test.el
               ./Makefile
               ./flake.nix
               ./scripts

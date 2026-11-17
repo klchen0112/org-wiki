@@ -136,6 +136,8 @@ THUNK is executed ITERATIONS times per rep."
   "Run all org-wiki benchmarks, printing TSV results to stdout."
   (setq gc-cons-threshold most-positive-fixnum)
   (let* ((org-id-locations (make-hash-table :test 'equal))
+         (org-wiki-search-backend 'org-ql-semantic)
+         (org-wiki-qmd-enabled nil)
          (root (org-wiki-bench--setup))
          (org-wiki-root (file-name-as-directory root))
          (org-id-locations-file (expand-file-name ".org-id-locations" root))

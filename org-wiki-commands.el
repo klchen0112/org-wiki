@@ -183,11 +183,10 @@ With prefix arg OTHER-WINDOW, use another window."
 ;;;###autoload
 (defun org-wiki-search (query &optional literal)
   "Search wiki nodes for QUERY and visit a chosen result.
-By default this runs the semantic backend via `org-wiki--search',
-which itself falls back to a literal text match when the backend
-errors.  With a prefix arg (LITERAL non-nil) the semantic backend is
-skipped entirely -- the predictable escape hatch when the embedding
-service is down.  A slow backend is interruptible with \\[keyboard-quit]."
+Use `org-wiki-search-backend' through `org-wiki--search', with literal
+fallback on backend failures.  With a prefix arg (LITERAL non-nil),
+skip all external search backends.  A slow backend is interruptible
+with \\[keyboard-quit]."
   (interactive "sWiki search: \nP")
   (let ((results (if literal
                      (seq-take (org-wiki--text-search
