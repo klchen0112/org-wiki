@@ -211,6 +211,133 @@ None.
 - [2026-07-30 Thu] created.
 ")
 
+(defconst org-wiki-test--file-node
+  ":PROPERTIES:
+:ID: file-node
+:WIKI_KIND: Topic
+:HASH_TEST: hidden
+:END:
+#+title: File title
+Preamble text.
+* Summary
+File-owned summary.
+* Child heading
+:PROPERTIES:
+:ID: file-node-child
+:WIKI_KIND: Concept
+:END:
+** Summary
+Child summary with [[id:file-node][a link back]].
+")
+
+(ert-deftest org-wiki-test-file-node-and-heading ()
+  "Resolve file and heading IDs independently, even in a narrowed buffer."
+  (org-wiki-test-with-fixtures
+   (let* ((file (org-wiki-test--write-fixture "mixed.org" org-wiki-test--file-node))
+          (org-wiki-search-backend 'text)
+          (buf (find-file-noselect file)))
+     (org-id-update-id-locations (list file) t)
+     (with-current-buffer buf
+       (goto-char (point-min))
+       (should (org-wiki-node-p))
+       (should (org-wiki-writable-p))
+       (re-search-forward "^\\* Child heading")
+       (org-narrow-to-subtree)
+       (should (equal (org-wiki-canonical-id "file-node") "file-node"))
+       (should (equal (org-wiki--resolve-id "file-node") "file-node"))
+       (should (equal (org-wiki-read-node "file-node") org-wiki-test--file-node))
+       (should (string-prefix-p "* Child heading" (org-wiki-read-node "file-node-child")))
+       (let ((meta (org-wiki-node-metadata "file-node")))
+         (should (equal (plist-get meta :id) "file-node"))
+         (should (equal (plist-get meta :wiki_kind) "Topic"))
+         (should-not (plist-member meta :hash_test)))
+       (should (buffer-narrowed-p))
+       (widen))
+     (let ((nodes (org-wiki--search "" 10)))
+       (should (= (length nodes) 2))
+       (dolist (query '("Preamble text" "File-owned" "File title"))
+         (let ((hits (org-wiki--search query 10)))
+           (should (= (length hits) 1))
+           (should (equal (car hits)
+                          (list :id "file-node" :title "File title" :kind "Topic"
+                                :file file :summary "File-owned summary.")))))
+       (should-not (member "file-node" (mapcar (lambda (n) (plist-get n :id))
+                                               (org-wiki--search "Child summary" 10)))))
+     (let ((report (org-wiki--health)))
+       (should (= (plist-get report :node-count) 2))
+       (should (equal (mapcar (lambda (i) (list (plist-get i :code) (plist-get i :id)))
+                              (plist-get report :issues))
+                      '(("orphan_node" "file-node-child"))))))))
+
+(ert-deftest org-wiki-test-live-file-node-becomes-heading-alias ()
+  "A live drawer edit changes discovery, title, and canonical ID immediately."
+  (org-wiki-test-with-fixtures
+   (let* ((file (org-wiki-test--write-fixture "mixed.org" org-wiki-test--file-node))
+          (files (list file)))
+     (puthash "file-node" file org-id-locations)
+     (with-current-buffer (find-file-noselect file)
+       (should (= 2 (length (org-wiki--text-search "" files))))
+       (should (equal (org-wiki-canonical-id "file-node") "file-node"))
+       (goto-char (point-min))
+       (should (equal (plist-get (org-wiki-node-metadata "file-node") :wiki_kind) "Topic"))
+       (org-entry-delete nil "WIKI_KIND")
+       (should (equal (org-wiki-canonical-id "file-node") "file-node-child"))
+       (should (= 1 (length (org-wiki--text-search "" files))))
+       (org-entry-put nil "WIKI_KIND" "Index")
+       (should (equal (plist-get (org-wiki-node-metadata "file-node") :wiki_kind) "Index"))
+       (search-forward "File title")
+       (replace-match "Renamed")
+       (let ((hit (car (org-wiki--text-search "Renamed" files))))
+         (should (equal (plist-get hit :id) "file-node"))
+         (should (equal (plist-get hit :kind) "Index"))
+         (should (equal (plist-get hit :title) "Renamed")))))))
+
+(ert-deftest org-wiki-test-file-node-semantic-owner ()
+  (org-wiki-test-with-fixtures
+   (let ((mixed (org-wiki-test--write-fixture "mixed.org" org-wiki-test--file-node))
+         (flat (org-wiki-test--write-fixture
+                "flat.org" ":PROPERTIES:\n:ID: flat\n:WIKI_KIND: Index\n:END:\nText.")))
+     (org-wiki-test--ensure-semantic-predicate)
+     (cl-letf (((symbol-function 'org-ql-semantic-files) (lambda (_) (list mixed flat)))
+               ((symbol-function 'org-ql-semantic--match-score)
+                (lambda (_)
+                  (cond ((equal (org-entry-get nil "ID") "flat") 0.7)
+                        ((not (org-at-heading-p)) nil)
+                        ((equal (org-get-heading t t t t) "Summary")
+                         (if (= 1 (org-outline-level)) 0.9 0.5))))))
+       (should (equal (mapcar (lambda (n) (plist-get n :id))
+                              (org-wiki--semantic-search "query" (list mixed flat)))
+                      '("file-node" "flat" "file-node-child")))))))
+
+(ert-deftest org-wiki-test-drifted-file-node-tools ()
+  "A file node discovered via org-roam can be read from a cold ID table."
+  (org-wiki-test-with-fixtures
+   (let* ((file (org-wiki-test--write-fixture "drifted.org" org-wiki-test--file-node))
+          (org-wiki-root (expand-file-name "wiki" org-wiki-test--fixture-dir))
+          (org-wiki-search-backend 'text))
+     (cl-letf (((symbol-function 'org-wiki--roam-wiki-files) (lambda () (list file))))
+       (let* ((hits (json-parse-string (org-wiki-mcp--search-tool "Preamble" 10)
+                                       :object-type 'plist :array-type 'list))
+              (id (plist-get (car hits) :id)))
+         (should (equal id "file-node"))
+         (should (equal (json-parse-string (org-wiki-mcp--read-node-tool id)
+                                           :object-type 'plist)
+                        (list :id id :body org-wiki-test--file-node))))
+       (let ((marker (with-current-buffer (find-file-noselect file)
+                       (copy-marker (point-min)))))
+         (should (org-wiki-node-p marker))
+         (should-not (org-wiki-writable-p marker)))))))
+
+(ert-deftest org-wiki-test-headingless-file-node ()
+  (org-wiki-test-with-fixtures
+   (let* ((body ":PROPERTIES:\n:ID: simple\n:WIKI_KIND: Entity\n:END:\nJust text.\n")
+          (file (org-wiki-test--write-fixture "simple.org" body)))
+     (puthash "simple" file org-id-locations)
+     (should (equal (org-wiki-read-node "simple") body))
+     (should (equal (org-wiki--text-search "simple" (list file))
+                    (list (list :id "simple" :title "simple" :kind "Entity"
+                                :file file :summary "")))))))
+
 ;;;; --- Identity predicate -----------------------------------------
 
 (ert-deftest org-wiki-test-node-p-true-on-wiki-node ()
@@ -650,14 +777,8 @@ an org-id locations lookup."
 
 ;;;; --- Two-id normalization (file-level alias) ---------------------
 
-;; Wiki node files on disk carry TWO ids: the file-level lint
-;; conventions mandate a top-of-file :PROPERTIES: drawer with its own
-;; :ID: and :CREATED:, while the node's canonical identity is the
-;; heading :ID: that carries :WIKI_KIND: (exactly one such heading
-;; per file, per the architecture doc).  The read tools must treat
-;; the file-level id as an alias for the node — not crash in
-;; `org-back-to-heading' — and must teach callers the canonical
-;; heading id.
+;; In the legacy convention, only the heading has a WIKI_KIND.  The file
+;; ID is a read alias and tool results report the canonical heading ID.
 
 (defconst org-wiki-test--file-level-id
   "AAAAAAAA-BBBB-4CCC-8DDD-EEEEFFFF0000"

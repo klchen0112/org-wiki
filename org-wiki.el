@@ -51,13 +51,9 @@
 ;;                           under `org-wiki-root' (the write-allowlist
 ;;                           boundary for the future mutation slice).
 ;;
-;; Two-id normalization: wiki node files on disk carry TWO ids.  The
-;; file-level lint conventions mandate a top-of-file :ID: drawer,
-;; while the node's canonical identity is the heading :ID: that
-;; carries :WIKI_KIND: (exactly one per file).  The read tools accept
-;; the file-level id as an alias and normalize it to the heading —
-;; `org-wiki-canonical-id' reports the heading id an alias resolves
-;; to, so agents can learn the id they should cite.
+;; Files and headings can each carry their own :WIKI_KIND: and canonical
+;; :ID:.  A file ID without a file-level :WIKI_KIND: remains a read alias
+;; for the first wiki heading, as used by older two-ID files.
 ;;
 ;; The read-only surface needs none of: file locking, write-ahead log,
 ;; recovery, hash discipline, sandboxing.  Those will be added in the
@@ -72,7 +68,7 @@
 (require 'seq)
 (require 'subr-x)
 
-;; org-ql is required at runtime for the search predicate
+;; org-ql is loaded on demand by the semantic backend.
 (declare-function org-ql-select "org-ql")
 (declare-function org-roam-backlinks-get "org-roam-mode")
 (declare-function org-roam-node-from-id "org-roam-node")
@@ -96,9 +92,8 @@
 
 (defcustom org-wiki-root (expand-file-name "wiki/" (or (bound-and-true-p org-roam-directory)
                                                        "~/org/"))
-  "Root directory of the wiki subtree.
-A node is a wiki node only if it lives under this directory AND has a
-`:WIKI_KIND:' property."
+  "Default directory for wiki discovery and the write boundary.
+Read discovery can also include wiki nodes indexed elsewhere by org-roam."
   :type 'directory
   :group 'org-wiki)
 
@@ -162,8 +157,7 @@ location `org-wiki-root' and the `:wiki:' filetag are placement
 canonical directory and remain valid for reads.  Write tools
 additionally require `org-wiki-writable-p' to be non-nil before they
 will mutate."
-  (save-excursion
-    (when pom (goto-char pom))
+  (org-with-point-at (or pom (point))
     (and (derived-mode-p 'org-mode)
          (org-entry-get nil "WIKI_KIND"))))
 
@@ -175,8 +169,9 @@ A node is writable iff it satisfies `org-wiki-node-p' AND its buffer file
 is under `org-wiki-root'.  Write-side tools (in the future mutation
 spike) gate on this; the read-only spike doesn't need it but exposes it
 for callers."
-  (and (org-wiki-node-p pom)
-       (org-wiki--under-root-p (buffer-file-name))))
+  (org-with-point-at (or pom (point))
+    (and (org-wiki-node-p)
+         (org-wiki--under-root-p (buffer-file-name)))))
 
 ;;;; --- Internal helpers -------------------------------------------
 
@@ -224,7 +219,7 @@ On a miss, refresh the locations table at most once per
       (when (> (- (float-time) org-wiki--id-last-refresh)
                org-wiki-id-refresh-interval)
         (setq org-wiki--id-last-refresh (float-time))
-        (org-id-update-id-locations (org-wiki--all-files))
+        (org-id-update-id-locations (org-wiki--candidate-files))
         (and (hash-table-p org-id-locations)
              (gethash id org-id-locations)))))
 
@@ -232,83 +227,88 @@ On a miss, refresh the locations table at most once per
   "Return a buffer visiting FILE, reusing any live buffer.
 Fresh buffers are fully initialized by `find-file-noselect' and left
 live, so later visits (and `org-wiki--visit') can reuse them safely."
-  (or (find-buffer-visiting file)
+  (or (get-file-buffer file)
+      (find-buffer-visiting file)
       (find-file-noselect file)))
 
-(defun org-wiki--id-line-regexp (id)
-  "Return a regexp matching the property-drawer `:ID:' line for ID."
-  (format "^[ \t]*:ID:[ \t]+%s\\b" (regexp-quote id)))
+(defun org-wiki--file-node-p ()
+  "Return the file's wiki kind at the start of a widened buffer."
+  (and (not (org-at-heading-p)) (org-entry-get nil "WIKI_KIND")))
 
-(defun org-wiki--goto-wiki-heading ()
-  "Move point to the buffer's first heading with a `:WIKI_KIND:' property.
-Return point on success; return nil when the buffer has no wiki
-heading, leaving point at end of buffer."
-  (goto-char (point-min))
-  (let (found)
-    (while (and (not found) (outline-next-heading))
-      (when (org-entry-get nil "WIKI_KIND")
-        (setq found (point))))
-    found))
+(defvar-local org-wiki--node-positions-cache nil
+  "Positions of wiki nodes at the last checked buffer modification tick.")
+
+(defun org-wiki--node-positions ()
+  "Return file and heading node positions in the current widened buffer."
+  (let ((tick (buffer-chars-modified-tick)))
+    (unless (eq tick (car org-wiki--node-positions-cache))
+      (save-excursion
+        (goto-char (point-min))
+        (let ((root (when (org-wiki--file-node-p) (list (point))))
+              (headings (org-element-map (org-element-parse-buffer 'headline) 'headline
+                          (lambda (heading)
+                            (let ((pos (org-element-property :begin heading)))
+                              (when (org-entry-get pos "WIKI_KIND") pos))))))
+          (setq org-wiki--node-positions-cache (cons tick (append root headings))))))
+    (cdr org-wiki--node-positions-cache)))
+
+(defun org-wiki--file-title (&optional file)
+  "Return the preamble's TITLE or the basename of FILE or the visited file."
+  (save-excursion
+    (save-restriction
+      (goto-char (point-min))
+      (outline-next-heading)
+      (narrow-to-region (point-min) (point))
+      (or (org-element-map (org-element-parse-buffer 'element) 'keyword
+            (lambda (keyword)
+              (when (equal (org-element-property :key keyword) "TITLE")
+                (let ((title (string-trim (org-element-property :value keyword))))
+                  (unless (string-empty-p title) title))))
+            nil t)
+          (file-name-base (or file buffer-file-name (buffer-name)))))))
+
+(defun org-wiki--goto-owner ()
+  "Move to the nearest enclosing wiki node and return its kind, if any."
+  (org-back-to-heading-or-point-min t)
+  (let ((kind (org-entry-get nil "WIKI_KIND")))
+    (while (and (not kind) (org-up-heading-safe))
+      (setq kind (org-entry-get nil "WIKI_KIND")))
+    (or kind (progn (goto-char (point-min)) (org-wiki--file-node-p)))))
+
+(defvar-local org-wiki--last-id-location nil
+  "Last successful ID lookup, keyed by ID and buffer modification tick.")
 
 (defun org-wiki--goto-id (id)
-  "Move point to the heading that owns ID in the current buffer.
-ID is matched as a property-drawer `:ID:' line.  Wiki node files
-carry a lint-mandated file-level `:ID:' drawer in addition to the
-heading id that carries `:WIKI_KIND:'; when ID names that top-of-file
-drawer — the match sits before the first headline — point is
-redirected to the file's `:WIKI_KIND:' heading (the architecture doc
-guarantees exactly one per file), so the file-level id acts as a
-read-path alias for the node.
-
-Return the canonical heading id: ID itself when it is heading-level,
-otherwise the `:ID:' of the heading redirected to.  Signal
-`org-wiki-error' with `:id_not_in_file' when ID does not occur in the
-buffer, and with `:not_a_wiki_node' when ID is file-level and the
-file has no `:WIKI_KIND:' heading to redirect to."
-  (goto-char (point-min))
-  (unless (re-search-forward (org-wiki--id-line-regexp id) nil t)
-    ;; Deliberately no file path in the payload: error payloads
-    ;; travel to whatever MCP client is connected.
-    (signal 'org-wiki-error (list :id_not_in_file id)))
-  (condition-case nil
-      (progn (org-back-to-heading t)
-             id)
-    ;; `org-back-to-heading' errors exactly when the match sits
-    ;; before the first headline, i.e. when ID is the file-level
-    ;; alias.  Probing with `org-before-first-heading-p' up front
-    ;; reads better but costs ~8% on the benched read-node hot path;
-    ;; this keeps the heading-id path's work byte-identical to the
-    ;; pre-alias code.  The handler body's own signals propagate —
-    ;; only the org-back-to-heading failure is caught, so its
-    ;; buffer-name-leaking message can never escape.
-    (error
-     (unless (org-wiki--goto-wiki-heading)
-       ;; Same privacy rule: the payload names the id, never the
-       ;; buffer or file.
-       (signal 'org-wiki-error (list :not_a_wiki_node id)))
-     (or (org-entry-get nil "ID") id))))
+  "Move to the entry for ID in a widened buffer and return its canonical ID.
+A file ID with no file-level WIKI_KIND redirects to its first wiki heading.
+Signal `org-wiki-error' for a stale location or an alias with no wiki node."
+  ;; Tool reads resolve the canonical ID and then immediately read it.
+  ;; Reuse that lookup until an edit can change the drawer or its position.
+  (let* ((tick (buffer-chars-modified-tick))
+         (pos (if (and (eq tick (car org-wiki--last-id-location))
+                       (equal id (nth 1 org-wiki--last-id-location)))
+                  (nth 2 org-wiki--last-id-location)
+                (org-find-entry-with-id id))))
+    (unless pos (signal 'org-wiki-error (list :id_not_in_file id)))
+    (setq org-wiki--last-id-location (list tick id pos))
+    (goto-char pos)
+    (if (or (org-at-heading-p) (org-wiki--file-node-p))
+        id
+      (let ((heading (car (org-wiki--node-positions))))
+        (unless heading (signal 'org-wiki-error (list :not_a_wiki_node id)))
+        (goto-char heading)
+        (or (org-entry-get nil "ID") id)))))
 
 (defun org-wiki--resolve-id (id)
-  "Return the canonical heading id for ID, or ID when it is not an alias.
-A warm `org-id-locations' lookup — never a corpus rescan, because
-this path backs `org-wiki--backlinks', which must keep accepting
-linker ids from outside the wiki id table — finds ID's file; when ID
-names the file-level drawer there and the file has a `:WIKI_KIND:'
-heading, that heading's `:ID:' is returned.  In every other case
-\(heading ids, unknown ids, files without a wiki heading) ID is
-returned unchanged; unlike `org-wiki-canonical-id' this never
-signals."
+  "Resolve a known file alias for backlinks, otherwise return ID.
+Only consult warm ID locations so external linkers need no corpus scan."
   (let ((file (and (hash-table-p org-id-locations)
                    (gethash id org-id-locations))))
-    (or (and file
-             (file-exists-p file)
+    (or (and file (file-exists-p file)
              (with-current-buffer (org-wiki--node-buffer file)
-               (save-excursion
-                 (goto-char (point-min))
-                 (and (re-search-forward (org-wiki--id-line-regexp id) nil t)
-                      (org-before-first-heading-p)
-                      (org-wiki--goto-wiki-heading)
-                      (org-entry-get nil "ID")))))
+               (org-with-wide-buffer
+                (condition-case nil (org-wiki--goto-id id)
+                  (org-wiki-error nil)))))
         id)))
 
 (defun org-wiki--hash-property-name ()
@@ -318,38 +318,39 @@ spike just won't strip a hash from `node-metadata' output."
   (when (fboundp 'org-hash-property)
     (org-hash-property)))
 
-(defun org-wiki--node-at-point-summary ()
-  "Return a plist summarizing the wiki node at point.
-Properties returned: :id :title :kind :file :summary."
-  (let* ((id    (org-entry-get nil "ID"))
-         (kind  (org-entry-get nil "WIKI_KIND"))
-         (title (or (org-entry-get nil "ITEM")
-                    (nth 4 (org-heading-components))))
-         (file  (buffer-file-name)))
-    (list :id id :title title :kind kind :file file
-          :summary (org-wiki--extract-summary))))
+(defvar-local org-wiki--node-data-cache nil
+  "Read results at node positions for the current buffer modification tick.")
 
-(defvar-local org-wiki--summary-cache nil
-  "Summary cache for the current buffer modification tick.")
+(defun org-wiki--cached-node-data (reader &optional context)
+  "Call READER at the current node, caching by buffer state and CONTEXT."
+  (let ((tick (buffer-chars-modified-tick))
+        (key (list reader (point) (point-min) (point-max) buffer-file-name context)))
+    (unless (eq tick (car org-wiki--node-data-cache))
+      (setq org-wiki--node-data-cache (cons tick (make-hash-table :test #'equal))))
+    (let ((table (cdr org-wiki--node-data-cache)))
+      (or (gethash key table)
+          (puthash key (funcall reader) table)))))
+
+(defun org-wiki--summarize-entry ()
+  "Build the summary plist for the node at point."
+  (list :id (org-entry-get nil "ID")
+        :title (if (org-at-heading-p) (org-entry-get nil "ITEM")
+                 (org-wiki--file-title))
+        :kind (org-entry-get nil "WIKI_KIND")
+        :file buffer-file-name
+        :summary (org-wiki--extract-summary)))
+
+(defun org-wiki--node-at-point-summary ()
+  "Return :id, :title, :kind, :file and :summary for the node at point."
+  (org-wiki--cached-node-data #'org-wiki--summarize-entry))
 
 (defun org-wiki--extract-summary ()
-  "Return the wiki node's direct Summary body, cached until text changes."
-  (let* ((tick (buffer-chars-modified-tick))
-         (key (list (point) (point-min) (point-max))))
-    (unless (eq tick (car org-wiki--summary-cache))
-      (setq org-wiki--summary-cache (cons tick (make-hash-table :test #'equal))))
-    (let* ((table (cdr org-wiki--summary-cache))
-           (cached (gethash key table)))
-      (or cached
-          (puthash key (org-wiki--compute-summary) table)))))
-
-(defun org-wiki--compute-summary ()
   "Return the first ordinary, direct Summary child's body at point.
 Respect the wiki node's level and exclude nested wiki subtrees.
 Return an empty string when no such child exists."
   (save-excursion
     (save-restriction
-      (org-narrow-to-subtree)
+      (when (org-at-heading-p) (org-narrow-to-subtree))
       (let ((level (1+ (org-outline-level))))
         (or (org-element-map (org-element-parse-buffer 'headline) 'headline
               (lambda (heading)
@@ -382,6 +383,15 @@ The region must begin at a line boundary in an Org buffer."
                 (setq cursor (org-element-property :end heading))))))
         (push (buffer-substring-no-properties cursor end) pieces)
         (apply #'concat (nreverse pieces))))))
+
+(defun org-wiki--owned-body ()
+  "Return this node's body text excluding nested wiki nodes."
+  (save-excursion
+    (if (org-at-heading-p)
+        (org-wiki--owned-region-text
+         (save-excursion (forward-line) (point))
+         (progn (org-end-of-subtree t t) (point)))
+      (org-wiki--owned-region-text (point-min) (point-max)))))
 
 ;;;; --- Discovery tools --------------------------------------------
 
@@ -419,7 +429,6 @@ Each result has keys :id :title :kind :file :summary.
 Use `org-wiki-search-backend' and `org-wiki-qmd-enabled' to select
 backends.  Errors and empty results fall through to the next backend.
 An empty QUERY uses literal discovery.  User quits always propagate."
-  (require 'org-ql)
   (let* ((k (or k org-wiki-default-search-limit))
          (files (org-wiki--candidate-files))
          (qmd
@@ -447,11 +456,11 @@ An empty QUERY uses literal discovery.  User quits always propagate."
 
 (defun org-wiki--semantic-search (query files)
   "Return wiki-node summaries for QUERY from FILES, best match first.
-A hit anywhere in a node's subtree surfaces the enclosing node — the
-nearest self-or-ancestor heading bearing `:WIKI_KIND:' — and each
-node is ranked by its best-matching heading's score.  The strongest
+Each heading hit surfaces the closest enclosing wiki heading or file.
+Each node is ranked by its best-matching heading's score.  The strongest
 matches are routinely on Summary/Definition subheadings, which carry
 no `:WIKI_KIND:' of their own."
+  (require 'org-ql)
   (let ((wiki-set (make-hash-table :test #'equal)))
     ;; Key the candidate set by truename: FILES are discovered through
     ;; `org-wiki-root', which may reach the corpus through symlinks,
@@ -474,12 +483,18 @@ no `:WIKI_KIND:' of their own."
                                       (let ((score (or (org-ql-semantic--match-score query)
                                                        0.0)))
                                         (save-excursion
-                                          (let ((kind (org-entry-get nil "WIKI_KIND")))
-                                            (while (and (not kind) (org-up-heading-safe))
-                                              (setq kind (org-entry-get nil "WIKI_KIND")))
-                                            (when kind
-                                              (cons score
-                                                    (org-wiki--node-at-point-summary)))))))))))
+                                          (when (org-wiki--goto-owner)
+                                            (cons score
+                                                  (org-wiki--node-at-point-summary))))))))))
+          ;; Org-ql iterates headings.  A backend that indexed the file ID
+          ;; can also score the preamble, including a file with no headings.
+          (dolist (file candidates)
+            (with-current-buffer (org-wiki--node-buffer file)
+              (org-with-wide-buffer
+               (goto-char (point-min))
+               (when (org-wiki--file-node-p)
+                 (when-let* ((score (ignore-errors (org-ql-semantic--match-score query))))
+                   (push (cons score (org-wiki--node-at-point-summary)) scored))))))
           ;; Rank the plists ourselves: `org-ql-select' applies :sort
           ;; to the ACTION results, and org-ql-semantic's comparator
           ;; expects org elements, so handing it summary plists dies
@@ -496,77 +511,87 @@ no `:WIKI_KIND:' of their own."
               (mapcar #'cdr
                       (sort out (lambda (a b) (> (car a) (car b))))))))))))
 
+(defun org-wiki--matches-text-p (query)
+  "Return non-nil if the node at point matches literal QUERY."
+  (let ((case-fold-search t))
+    (if (org-at-heading-p)
+        ;; Match the heading and its entry text, as in org-ql's regexp predicate.
+        (save-excursion
+          (search-forward query (save-excursion (outline-next-heading) (point)) t))
+      (let ((pattern (regexp-quote query)))
+        (or (string-match-p pattern (org-wiki--file-title))
+            (string-match-p pattern (org-wiki--owned-body)))))))
+
+(defun org-wiki--select-nodes (files action &optional query)
+  "Call ACTION at wiki nodes in FILES, optionally matching literal QUERY."
+  (let (results)
+    (dolist (file files)
+      (when-let* ((buffer (or (get-file-buffer file)
+                              (and (file-readable-p file) (org-wiki--node-buffer file)))))
+        (with-current-buffer buffer
+          (org-with-wide-buffer
+           (dolist (pos (org-wiki--node-positions))
+             (goto-char pos)
+             (when (or (not query) (string-empty-p query) (org-wiki--matches-text-p query))
+               (push (funcall action) results)))))))
+    (nreverse results)))
+
 (defun org-wiki--text-search (query files)
   "Return wiki-node summaries matching QUERY literally in FILES."
-  (org-ql-select files
-                 `(and (property "WIKI_KIND")
-                       (or (heading ,query)
-                           (regexp ,(regexp-quote query))))
-                 :action #'org-wiki--node-at-point-summary))
+  (org-wiki--select-nodes files #'org-wiki--node-at-point-summary query))
 
 ;;;###autoload
 (defun org-wiki-canonical-id (id)
-  "Return the canonical heading id of the wiki node that ID denotes.
-For a heading id this is ID itself.  For the lint-mandated file-level
-`:ID:' that wiki node files carry alongside the heading's own id, it
-is the `:ID:' of the file's `:WIKI_KIND:' heading — the id callers
-should cite in links and subsequent tool calls.  Signals
-`org-wiki-error' when ID cannot be located (`:unknown_id'), is absent
-from its recorded file (`:id_not_in_file'), or names a file with no
-wiki heading (`:not_a_wiki_node')."
+  "Return the canonical file or heading ID for a wiki node.
+A file ID without its own WIKI_KIND aliases the first wiki heading.
+Signal `org-wiki-error' for an unknown ID, stale location or invalid alias."
   (let ((file (org-wiki--locate-id id)))
     (unless file
       (signal 'org-wiki-error (list :unknown_id id)))
     (with-current-buffer (org-wiki--node-buffer file)
-      (save-excursion
-        (org-wiki--goto-id id)))))
+      (org-with-wide-buffer
+       (org-wiki--goto-id id)))))
 
 ;;;###autoload
 (defun org-wiki-read-node (id)
   "Return the full body of the wiki node with ID as a plain-text string.
-The returned text is the node's whole subtree, including its property
-drawer.  ID may be either the node's heading id or the lint-mandated
-file-level `:ID:' of its file; the latter is normalized to the file's
-`:WIKI_KIND:' heading, and `org-wiki-canonical-id' reports the
-heading id such an alias resolves to.  Signals `org-wiki-error' if no
-node with that ID exists, or if it isn't a wiki node."
+The returned text includes the property drawer and all child headings.
+File nodes return the whole file.  For a file ID used as a heading alias,
+see `org-wiki-canonical-id'.  Signal `org-wiki-error' for unknown nodes."
   (let ((file (org-wiki--locate-id id)))
     (unless file
       (signal 'org-wiki-error (list :unknown_id id)))
     (with-current-buffer (org-wiki--node-buffer file)
-      (save-excursion
-        (org-wiki--goto-id id)
-        (unless (org-wiki-node-p)
-          (signal 'org-wiki-error (list :not_a_wiki_node id)))
-        (save-restriction
-          (org-narrow-to-subtree)
-          (buffer-substring-no-properties (point-min) (point-max)))))))
+      (org-with-wide-buffer
+       (org-wiki--goto-id id)
+       (unless (org-wiki-node-p)
+         (signal 'org-wiki-error (list :not_a_wiki_node id)))
+       (when (org-at-heading-p) (org-narrow-to-subtree))
+       (buffer-substring-no-properties (point-min) (point-max))))))
+
+(defun org-wiki--entry-metadata ()
+  "Collect standard properties at point, excluding integrity hashes."
+  (cl-loop for (key . value) in (org-entry-properties nil 'standard)
+           unless (string-prefix-p "HASH_" key t)
+           append (list (intern (concat ":" (downcase key))) value)))
 
 ;;;###autoload
 (defun org-wiki-node-metadata (id)
   "Return a plist of the property drawer of the wiki node with ID.
-ID may be the heading id or its file-level alias (see
-`org-wiki-canonical-id'); either way the plist's :id entry carries
-the canonical heading id.  Hash properties (any property whose name
-starts with \"HASH_\") are stripped unconditionally: the integrity
-hash is tool-maintained and is never surfaced through the metadata
-view, whether or not org-hash is loaded in this session."
+ID may be a file ID, heading ID or file alias (see `org-wiki-canonical-id').
+The :id entry carries the canonical ID.  Hash properties whose names
+start with \"HASH_\" are omitted."
   (let ((file (org-wiki--locate-id id)))
     (unless file
       (signal 'org-wiki-error (list :unknown_id id)))
     (with-current-buffer (org-wiki--node-buffer file)
-      (save-excursion
-        (org-wiki--goto-id id)
-        (let ((props (cl-remove-if
-                      (lambda (kv)
-                        (string-prefix-p "HASH_" (car kv) t))
-                      (org-entry-properties nil 'standard))))
-          ;; Convert to a JSON-friendly plist
-          (apply #'append
-                 (mapcar (lambda (kv)
-                           (list (intern (concat ":" (downcase (car kv))))
-                                 (cdr kv)))
-                         props)))))))
+      (org-with-wide-buffer
+       (org-wiki--goto-id id)
+       (copy-sequence
+        (org-wiki--cached-node-data
+         #'org-wiki--entry-metadata
+         ;; CATEGORY can also be supplied by Org outside the drawer.
+         (org-get-category)))))))
 
 (defun org-wiki--backlinks (id)
   "Return a list of plists describing backlinks to the wiki node with ID.

@@ -77,6 +77,34 @@
       (org-wiki-qmd-sync)
       ,@body)))
 
+(ert-deftest org-wiki-qmd-test-file-node-sync-and-search ()
+  (org-wiki-qmd-test--fixture
+   ;; An untitled file exercises the same basename fallback in the detached
+   ;; sync buffer and the visiting buffer used to validate a search hit.
+   (with-temp-file source
+     (insert ":PROPERTIES:\n:ID: root\n:WIKI_KIND: Entity\n:END:\nPreamble.\n"
+             "* Summary\nRoot summary.\n"
+             (string-remove-prefix "#+title: Mixed file\n" org-wiki-qmd-test--source)))
+   (cl-letf (((symbol-function 'org-wiki-qmd--run) #'org-wiki-qmd-test--run))
+     (org-wiki-qmd-setup)
+     (org-wiki-qmd-sync)
+     (let* ((nodes (plist-get (org-wiki-qmd--read "manifest.json") :nodes))
+            (root (seq-find (lambda (n) (equal (plist-get n :id) "root")) nodes))
+            (text (with-temp-buffer
+                    (insert-file-contents
+                     (org-wiki-qmd--path (concat "nodes/" (plist-get root :path))))
+                    (buffer-string)))
+            (hits (org-wiki-qmd--search "query" 10))
+            (hit (seq-find (lambda (n) (equal (plist-get n :id) "root")) hits)))
+       (should (= (length hits) 3))
+       (should (equal (plist-get hit :summary) "Root summary."))
+       (should (equal (plist-get hit :title) "sample"))
+       (should (string-match-p "# sample\n\nKind: Entity\n\nPreamble." text))
+       (should (string-match-p "## Summary\nRoot summary." text))
+       (should-not (string-match-p "Child secret\\\\|Parent summary\\\\|PROPERTIES" text))
+       (should (org-wiki-qmd--file-has-node-p source "root"))
+       (should (string-prefix-p ":PROPERTIES:" (org-wiki-read-node "root")))))))
+
 (ert-deftest org-wiki-qmd-test-owned-content-and-summary ()
   (org-wiki-qmd-test--index
    (let* ((nodes (plist-get (org-wiki-qmd--read "manifest.json") :nodes))
@@ -462,9 +490,9 @@
     (org-mode)
     (insert "* Parent\n** Summary\nFirst.\n")
     (goto-char (point-min))
-    (should (equal (org-wiki--extract-summary) "First."))
+    (should (equal (plist-get (org-wiki--node-at-point-summary) :summary) "First."))
     (save-excursion (goto-char (point-max)) (insert "Second.\n"))
-    (should (equal (org-wiki--extract-summary) "First.\nSecond."))
+    (should (equal (plist-get (org-wiki--node-at-point-summary) :summary) "First.\nSecond."))
     (should (= (point) (point-min)))))
 
 (ert-deftest org-wiki-qmd-test-code-text-is-inert ()

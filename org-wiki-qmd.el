@@ -415,15 +415,14 @@ Reject unsaved visiting buffers, including buffers visiting symlinks."
       (error "QMD sync: unsaved buffer for %s" file)))
   (with-temp-buffer (insert-file-contents file) (buffer-string)))
 
-(defun org-wiki-qmd--markdown ()
-  "Render the wiki heading at point as inert Markdown.
+(defun org-wiki-qmd--markdown (&optional file)
+  "Render the wiki node at point as inert Markdown, using FILE for its name.
 Retain text, code and link labels; never invoke an Org exporter."
-  (let ((title (org-get-heading t t t t))
+  (let ((title (if (org-at-heading-p) (org-get-heading t t t t)
+                 (org-wiki--file-title file)))
         (level (org-outline-level))
         (kind (org-entry-get nil "WIKI_KIND"))
-        (body (org-wiki--owned-region-text
-               (save-excursion (forward-line) (point))
-               (save-excursion (org-end-of-subtree t t) (point)))))
+        (body (org-wiki--owned-body)))
     (with-temp-buffer
       (insert body)
       (delay-mode-hooks (org-mode))
@@ -473,19 +472,17 @@ Return nodes and file hashes; report and exclude all duplicate IDs."
         (with-temp-buffer
           (insert text)
           (delay-mode-hooks (org-mode))
-          (org-element-map (org-element-parse-buffer 'headline) 'headline
-            (lambda (heading)
-              (goto-char (org-element-property :begin heading))
-              (when (org-entry-get nil "WIKI_KIND")
-                (if-let* ((id (org-entry-get nil "ID")))
-                    (let* ((markdown (org-wiki-qmd--markdown))
-                           (node (list :id id :file file
-                                       :path (concat (secure-hash 'sha256 id) ".md")
-                                       :hash (secure-hash 'sha256 markdown)
-                                       :text markdown)))
-                      (puthash id (cons node (gethash id by-id)) by-id))
-                  (push (format "Missing ID: %s:%s" file (line-number-at-pos))
-                        org-wiki-qmd--diagnostics))))))))
+          (dolist (pos (org-wiki--node-positions))
+            (goto-char pos)
+            (if-let* ((id (org-entry-get nil "ID")))
+                (let* ((markdown (org-wiki-qmd--markdown file))
+                       (node (list :id id :file file
+                                   :path (concat (secure-hash 'sha256 id) ".md")
+                                   :hash (secure-hash 'sha256 markdown)
+                                   :text markdown)))
+                  (puthash id (cons node (gethash id by-id)) by-id))
+              (push (format "Missing ID: %s:%s" file (line-number-at-pos))
+                    org-wiki-qmd--diagnostics))))))
     (maphash (lambda (id entries)
                (if (cdr entries)
                    (push (format "Duplicate ID: %s" id) org-wiki-qmd--diagnostics)
@@ -659,15 +656,12 @@ Failed embedding leaves qmd unready; run sync to recover keyword search."
          (org-wiki-qmd--write "state.json" state))))))
 
 (defun org-wiki-qmd--file-has-node-p (file id)
-  "Return non-nil when saved FILE has a wiki heading with the exact ID."
+  "Return non-nil when saved FILE has a wiki node with the exact ID."
   (with-temp-buffer
     (insert (org-wiki-qmd--source-text (file-truename file)))
     (delay-mode-hooks (org-mode))
-    (org-element-map (org-element-parse-buffer 'headline) 'headline
-      (lambda (heading)
-        (goto-char (org-element-property :begin heading))
-        (and (equal id (org-entry-get nil "ID")) (org-wiki-node-p)))
-      nil t)))
+    (seq-some (lambda (pos) (equal id (org-entry-get pos "ID")))
+              (org-wiki--node-positions))))
 
 (defun org-wiki-qmd--validate-node (node)
   "Return the current summary for NODE and register its verified ID.

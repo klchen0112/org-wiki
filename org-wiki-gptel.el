@@ -236,8 +236,7 @@ plists for one big alist and produces a single mangled object."
 (defun org-wiki-gptel--read-node (id)
   "Return the full body of the wiki node with ID as JSON.
 The result is a JSON object with id and body; the id field carries
-the node's canonical heading id, which differs from ID when ID is
-the file-level alias."
+the node's canonical file or heading ID."
   (org-wiki-gptel--with-error-json
     (let ((id (org-wiki-canonical-id id)))
       (json-encode (list :id id :body (org-wiki-read-node id))))))
@@ -306,8 +305,8 @@ before concluding a coverage gap.")
    :name "wiki_read_node"
    :function #'org-wiki-gptel--read-node
    :description "Return the full body of the wiki node with the given \
-:ID: — its whole subtree with Org syntax preserved — as a JSON object \
-{id, body}.  The id field carries the node's canonical heading id; \
+:ID: — its file or subtree with Org syntax preserved — as a JSON object \
+{id, body}.  The id field carries the canonical node ID, \
 adopt it for links and subsequent calls."
    :args (list (list :name "id"
                      :type 'string

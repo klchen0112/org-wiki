@@ -163,25 +163,20 @@ must not reach `seq-take', so anything outside 1..100 falls back to
 
 (defun org-wiki-mcp--read-node-tool (id)
   "Return the full body of the wiki node with ID.
-The id field of the result carries the node's canonical heading id,
-which differs from ID when ID is the file-level alias — agents
-should adopt the canonical id for links and subsequent calls.
+The id field carries the canonical file or heading ID to cite.
 
 MCP Parameters:
-  id - the :ID: property value (a UUID or src-<uuid> string; the
-       file-level :ID: of a node file is accepted as an alias and
-       normalized to the node's heading)."
+  id - the node's :ID: property or a legacy file ID alias."
   (org-wiki-mcp--with-error-handling
     (let ((id (org-wiki-canonical-id id)))
       (json-encode (list :id id :body (org-wiki-read-node id))))))
 
 (defun org-wiki-mcp--node-metadata-tool (id)
   "Return the property drawer of the wiki node with ID (hash omitted).
-The id entry of the result carries the node's canonical heading id.
+The id entry carries the canonical file or heading ID.
 
 MCP Parameters:
-  id - the :ID: property value (heading id, or the file-level alias
-       which is normalized to the node's heading)."
+  id - the node's :ID: property or a legacy file ID alias."
   (org-wiki-mcp--with-error-handling
     (json-encode (org-wiki-node-metadata id))))
 
@@ -189,9 +184,7 @@ MCP Parameters:
   "Return backlinks to the wiki node with ID.
 
 MCP Parameters:
-  id - the :ID: property value of the target node (heading id, or
-       the file-level alias which is normalized to the node's
-       heading)."
+  id - the target node's :ID: property or a legacy file ID alias."
   (org-wiki-mcp--with-error-handling
     (json-encode (org-wiki--backlinks id))))
 
@@ -209,7 +202,7 @@ up to k results as JSON objects with id, title, kind, file, and \
 summary, ordered by semantic similarity when the backend is available.")
     ("wiki_read_node" org-wiki-mcp--read-node-tool
      "Return the full body of the wiki node with the given :ID: — its \
-whole subtree with Org syntax preserved.")
+file or subtree with Org syntax preserved.")
     ("wiki_node_metadata" org-wiki-mcp--node-metadata-tool
      "Return the property drawer of the wiki node with the given :ID: \
 as JSON, with tool-maintained hash properties stripped.")

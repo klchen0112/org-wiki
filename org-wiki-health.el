@@ -23,21 +23,24 @@
 (require 'subr-x)
 (require 'org-wiki)
 
-(declare-function org-ql-select "org-ql")
-
-(defun org-wiki--id-links-in-subtree ()
-  "Return id-link targets in the current Org subtree."
+(defun org-wiki--id-links-in-node ()
+  "Return id-link targets owned by the current file or heading node."
   (save-restriction
-    (org-narrow-to-subtree)
-    (org-element-map (org-element-parse-buffer) 'link
-      (lambda (link)
-        (when (string= (org-element-property :type link) "id")
-          (org-element-property :path link))))))
+    (when (org-at-heading-p) (org-narrow-to-subtree))
+    (let ((node-start (point)))
+      (org-element-map (org-element-parse-buffer) 'link
+        (lambda (link)
+          (when (and (equal (org-element-property :type link) "id")
+                     (save-excursion
+                       (goto-char (org-element-property :begin link))
+                       (org-wiki--goto-owner)
+                       (= (point) node-start)))
+            (org-element-property :path link)))))))
 
 (defun org-wiki--health-node-at-point ()
   "Return the health-check data for the wiki node at point."
   (append (org-wiki--node-at-point-summary)
-          (list :links (org-wiki--id-links-in-subtree)
+          (list :links (org-wiki--id-links-in-node)
                 :source-ids (split-string
                              (or (org-entry-get nil "SOURCE_IDS") "")
                              "[ \t]*,[ \t]*" t)
@@ -64,10 +67,8 @@
 The report checks identity, kind, summaries, canonical id links, source
 provenance, citation metadata and type-aware connectivity.  It makes no
 LLM calls and never modifies the corpus."
-  (require 'org-ql)
-  (let* ((nodes (org-ql-select (org-wiki--candidate-files)
-                               '(property "WIKI_KIND")
-                               :action #'org-wiki--health-node-at-point))
+  (let* ((nodes (org-wiki--select-nodes (org-wiki--candidate-files)
+                                        #'org-wiki--health-node-at-point))
          (by-id (make-hash-table :test #'equal))
          (inbound (make-hash-table :test #'equal))
          issues)
@@ -102,7 +103,7 @@ LLM calls and never modifies the corpus."
              (links (plist-get node :links)))
         (unless id
           (push (org-wiki--health-issue
-                 "missing_id" node "Wiki heading has no ID property")
+                 "missing_id" node "Wiki node has no ID property")
                 issues))
         (unless (member kind org-wiki-kinds)
           (push (org-wiki--health-issue

@@ -25,6 +25,26 @@
 (defvar embark-transformer-alist)
 (declare-function embark--targets "ext:embark")
 
+(ert-deftest org-wiki-commands-test-file-node-navigation ()
+  (org-wiki-test-with-fixtures
+   (let* ((file (org-wiki-test--write-fixture "mixed.org" org-wiki-test--file-node))
+          (nodes (org-wiki--all-nodes))
+          (node (seq-find (lambda (n) (equal (plist-get n :id) "file-node")) nodes)))
+     (should (= (length nodes) 2))
+     (should (= (plist-get node :point) 1))
+     (should (= (marker-position (org-wiki--preview-marker node)) 1))
+     (save-window-excursion
+       (org-wiki--visit node)
+       (should (equal (buffer-file-name) file))
+       (should (= (point) (point-min)))
+       (should (equal (org-wiki--id-at-point) "file-node"))
+       (search-forward "File-owned summary")
+       (should (equal (org-wiki--id-at-point) "file-node"))
+       (search-forward "Child summary")
+       (should (equal (org-wiki--id-at-point) "file-node-child"))
+       (search-forward "a link back")
+       (should (equal (org-wiki--id-at-point) "file-node"))))))
+
 (ert-deftest org-wiki-commands-test-all-nodes ()
   "`org-wiki--all-nodes' returns wiki nodes only, with kind+summary."
   (org-wiki-test-with-fixtures

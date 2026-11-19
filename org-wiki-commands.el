@@ -30,7 +30,6 @@
 (require 'org-wiki)
 (require 'org-wiki-health)
 
-(declare-function org-ql-select "org-ql")
 (declare-function consult--read "ext:consult")
 (declare-function consult--jump-preview "ext:consult")
 
@@ -44,10 +43,8 @@
   "Return a list of plists, one per wiki node across the candidate files.
 Each plist has keys :id :title :kind :file :point :summary.  This is
 the embedding-free enumeration; it never contacts the semantic backend."
-  (require 'org-ql)
-  (org-ql-select (org-wiki--candidate-files)
-                 '(property "WIKI_KIND")
-                 :action #'org-wiki--node-at-point-plist))
+  (org-wiki--select-nodes (org-wiki--candidate-files)
+                          #'org-wiki--node-at-point-plist))
 
 (defun org-wiki--read (prompt nodes)
   "Use PROMPT to read one of NODES in the minibuffer.
@@ -114,7 +111,7 @@ string is unique.  When consult is loaded, the read goes through
    cands))
 
 (defun org-wiki--visit (node &optional other-window)
-  "Visit NODE's heading.  With OTHER-WINDOW non-nil, use another window."
+  "Visit NODE at its file or heading, in another window if OTHER-WINDOW."
   (let* ((id (plist-get node :id))
          (file (or (plist-get node :file)
                    (and id (org-wiki--locate-id id)))))
@@ -125,21 +122,19 @@ string is unique.  When consult is loaded, the read goes through
       (if other-window (pop-to-buffer buf) (pop-to-buffer-same-window buf))
       (with-current-buffer buf
         (widen)
-        (goto-char (point-min))
-        (let ((pos (and id (org-find-entry-with-id id))))
-          (if pos
-              (progn (goto-char pos) (org-back-to-heading t))
-            (when (plist-get node :point)
-              (goto-char (plist-get node :point)))))
-        (org-fold-show-context 'org-goto)
+        (org-wiki--goto-candidate node)
+        (when (org-at-heading-p) (org-fold-show-context 'org-goto))
         (recenter)))))
 
+(defun org-wiki--goto-candidate (node)
+  "Move to NODE in the current widened file, including non-wiki backlinks."
+  (unless (when-let* ((id (plist-get node :id)))
+            (condition-case nil (org-wiki--goto-id id)
+              (org-wiki-error nil)))
+    (goto-char (or (plist-get node :point) (point-min)))))
+
 (defun org-wiki--target-at-point ()
-  "Return (ID BEG . END) for the wiki node target at point, or nil.
-ID comes from an id: link at point, or from the enclosing wiki
-heading; BEG..END is the buffer extent of the link (sans trailing
-whitespace), or of the heading line.  Return nil when point is on
-neither, or when not in an Org buffer."
+  "Return (ID BEG . END) for an id: link or the enclosing wiki node."
   (when (derived-mode-p 'org-mode)
     (let ((ctx (org-element-context)))
       (cond
@@ -149,22 +144,20 @@ neither, or when not in an Org buffer."
               (cons (org-element-property :begin ctx)
                     (- (org-element-property :end ctx)
                        (or (org-element-property :post-blank ctx) 0)))))
-       ((and (not (org-before-first-heading-p))
-             (org-entry-get nil "WIKI_KIND")
-             (org-entry-get nil "ID"))
-        (cons (org-entry-get nil "ID")
-              (save-excursion
-                (org-back-to-heading t)
-                (cons (point) (line-end-position)))))))))
+       (t
+        (org-with-wide-buffer
+         (when (and (org-wiki--goto-owner) (org-entry-get nil "ID"))
+           (cons (org-entry-get nil "ID")
+                 (cons (point) (line-end-position))))))))))
 
 (defun org-wiki--id-at-point ()
-  "Return a wiki node id at point: an id: link, or the enclosing heading.
+  "Return the id: link at point or the ID of the enclosing wiki node.
 Return nil when point is on neither, or when not in an Org buffer."
   (car (org-wiki--target-at-point)))
 
 (defun org-wiki--read-id (prompt)
   "Return a wiki node id from point, or read one with PROMPT.
-Prefers an id: link or the enclosing wiki heading at point; with
+Prefers an id: link or the enclosing wiki node at point; with
 neither, prompt with the full node picker.  Return nil when the
 picker has no nodes to offer."
   (or (org-wiki--id-at-point)
@@ -202,7 +195,7 @@ with \\[keyboard-quit]."
 (defun org-wiki-backlinks (&optional id)
   "Visit a node that links to the wiki node ID.
 Interactively, ID defaults to the node at point (an id: link or the
-enclosing wiki heading); with none, prompt for a node."
+enclosing wiki node); with none, prompt for a node."
   (interactive)
   (let ((id (or id (org-wiki--read-id "Backlinks to: "))))
     (unless id (user-error "org-wiki: No node specified"))
@@ -304,7 +297,7 @@ whether and how to visit the selected node."
                     (org-wiki--preview-marker cand))))))
 
 (defun org-wiki--preview-marker (node)
-  "Return a marker at NODE's heading for previewing, or nil.
+  "Return a marker at NODE's file or heading for previewing, or nil.
 Reuses or opens the node's file buffer; opened buffers are fully
 initialized and left live, so repeated previews and later visits are
 cheap.  Degrades to nil — no preview —
@@ -316,9 +309,7 @@ when NODE has no :file and `org-wiki--locate-id' cannot find its id
     (when (and file (file-exists-p file))
       (with-current-buffer (org-wiki--node-buffer file)
         (org-with-wide-buffer
-         (goto-char (or (and id (org-find-entry-with-id id))
-                        (plist-get node :point)
-                        (point-min)))
+         (org-wiki--goto-candidate node)
          (point-marker))))))
 
 ;;;; --- embark integration (optional) ------------------------------

@@ -20,12 +20,17 @@
  (let ((org-wiki-qmd-search-timeout 120)
        (org-wiki-qmd-maintenance-timeout 1800))
    (with-temp-file source
-     (insert (string-replace "Parent summary." "Parent summary. 内容寻址使用哈希。"
+     (insert ":PROPERTIES:\n:ID: file-root\n:WIKI_KIND: Topic\n:END:\n"
+             (string-replace "Parent summary." "Parent summary. 内容寻址使用哈希。"
                              org-wiki-qmd-test--source)))
    (org-wiki-qmd-setup)
    (should-not org-wiki-qmd-test--calls)
    (org-wiki-qmd-sync)
    (should (org-wiki-qmd--ready))
+   (let ((hits (org-wiki-qmd--search "Outside" 10)))
+     (should (equal (mapcar (lambda (n) (plist-get n :id)) hits) '("file-root")))
+     (should (equal (plist-get (car hits) :title) "Mixed file"))
+     (should (string-prefix-p ":PROPERTIES:" (org-wiki-read-node "file-root"))))
    (should (equal '("parent")
                   (mapcar (lambda (node) (plist-get node :id))
                           (org-wiki-qmd--search "内容寻址" 10))))

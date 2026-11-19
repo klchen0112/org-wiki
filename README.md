@@ -46,10 +46,9 @@ An LLM Wiki moves synthesis into the knowledge base itself:
    answer should say what is missing and suggest a source to ingest.
 
 In Org-wiki, the storage layer is plain Org. A wiki node is an Org
-heading with an `:ID:` and a `:WIKI_KIND:` property. Org-roam supplies
-stable IDs, backlinks, and graph structure; org-ql supplies fast
-property-based selection; optional `org-ql-semantic` supplies semantic
-search. LLM access is mediated through tools rather than arbitrary file
+file or heading with an `:ID:` and a `:WIKI_KIND:` property. Org-roam supplies
+stable IDs, backlinks, and graph structure. The optional
+`org-ql-semantic` backend ranks heading matches through org-ql. LLM access is mediated through tools rather than arbitrary file
 edits.
 
 ## Current Scope
@@ -81,8 +80,9 @@ will depend on.
 
 ## Data Model
 
-Wiki identity is property-based. Any Org heading with `:WIKI_KIND:` is a
-wiki node, regardless of its file path:
+Wiki identity is property-based. A `:WIKI_KIND:` property marks a file or
+heading as a wiki node, regardless of its path. For a heading node, put
+the drawer directly below the heading.
 
 ```org
 * Content-Addressed Storage
@@ -114,10 +114,26 @@ Supported `:WIKI_KIND:` values are:
 - `Frozen`
 - `Index`
 
-Org-wiki also handles the two-ID convention common in this corpus:
-files may have a top-level file ID while the real wiki node has a
-heading ID. Read tools accept the file-level ID as an alias and return
-the canonical heading ID so callers learn what to cite next time.
+For a file node, put the drawer at the start of the file. Use `#+title`
+for its display title and a top-level `* Summary` for its summary.
+The filename without its extension supplies the title when the file has
+no title keyword. A file can also have a body without any headings.
+
+```org
+:PROPERTIES:
+:ID:        d87ae4a1-cd2d-4667-9e59-b4fd22408b9e
+:WIKI_KIND: Topic
+:END:
+#+title: Storage systems
+
+* Summary
+Notes on how storage systems organize data.
+```
+
+A file node and wiki headings within it each have their own canonical
+ID. In older two-ID files, the file drawer carries only an ID and the
+heading carries `:WIKI_KIND:`. That file ID still resolves to the first
+wiki heading.
 
 ## Implementation
 
@@ -170,7 +186,7 @@ The default sync scope requires a working org-roam database as well as
 `org-wiki-qmd-discovery-scope` to `root-only` before syncing.
 
 1. Save your Org buffers, then run `M-x org-wiki-qmd-setup`.
-2. Run `M-x org-wiki-qmd-sync` to index saved wiki headings.
+2. Run `M-x org-wiki-qmd-sync` to index saved wiki nodes.
 3. Enable search with the following configuration:
 
 ```elisp
@@ -232,7 +248,8 @@ The CLI contract and real output fixture are recorded in
 
 ### Reads
 
-`org-wiki-read-node` returns the full Org subtree for a node ID.
+`org-wiki-read-node` returns the entire Org file for a file node and the full
+subtree for a heading node, including any nested wiki headings.
 `org-wiki-node-metadata` returns a plist of property values and removes
 hash-maintenance properties such as `HASH_*`.
 `org-wiki--backlinks` returns backlink plists with source ID, title, and
