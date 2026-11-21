@@ -22,7 +22,21 @@
         let
           inherit (pkgs) lib;
 
-          emacsPackages = pkgs.emacsPackagesFor pkgs.emacs-nox;
+          # The ELPA archive used by this nixpkgs revision has been retired.
+          emacsPackages = (pkgs.emacsPackagesFor pkgs.emacs-nox).overrideScope (
+            _final: prev: {
+              org = prev.org.overrideAttrs (_old: {
+                version = "9.8.10";
+                src = pkgs.fetchurl {
+                  urls = [
+                    "https://elpa.gnu.org/packages/org-9.8.10.tar"
+                    "https://raw.githubusercontent.com/emacs-elpa/mirror/refs/tags/2026-09-15/stable/gnu/org-9.8.10.tar"
+                  ];
+                  hash = "sha256-iQqd1cTx0nn27Qs9EGcNeWqsy3/ccaKmZc0VO+xGPx0=";
+                };
+              });
+            }
+          );
 
           # The nixpkgs MELPA snapshot predates the
           # mcp-server-lib-register-server API (0.4.0) that both the
@@ -73,6 +87,7 @@
               ./org-wiki-commands.el
               ./org-wiki-gptel.el
               ./org-wiki-qmd.el
+              ./org-wiki-memory.el
             ];
           };
 
@@ -85,10 +100,12 @@
               ./org-wiki-commands.el
               ./org-wiki-gptel.el
               ./org-wiki-qmd.el
+              ./org-wiki-memory.el
               ./org-wiki-test.el
               ./org-wiki-commands-test.el
               ./org-wiki-gptel-test.el
               ./org-wiki-qmd-test.el
+              ./org-wiki-memory-test.el
               ./Makefile
               ./flake.nix
               ./scripts
@@ -126,6 +143,7 @@
                 cp -r ${checkSrc}/. build
                 chmod -R u+w build
                 cd build
+                patchShebangs scripts
                 find . -name '*.elc' -delete
                 export HOME="$TMPDIR"
                 make ${target} EMACS=emacs
@@ -139,6 +157,8 @@
             packages = [
               emacsForDev
               pkgs.eask-cli
+              pkgs.nodejs_24
+              pkgs.gitMinimal
               pkgs.gnumake
               pkgs.lefthook
               pkgs.shfmt

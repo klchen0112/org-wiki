@@ -12,10 +12,9 @@ links and metadata, and answer later questions from the accumulated
 wiki. The wiki becomes a durable memory of prior synthesis rather than
 another transient retrieval result.
 
-This repository is the first working slice of that design. It is
-intentionally read-only: it exposes search, read, metadata, and backlink
-operations over wiki nodes, and it provides those operations to three
-callers:
+The optional agent memory module lets Pi and DeepSeek Harness remember, recall, correct, and forget project decisions and personal preferences in the same Org corpus. See the [setup guide, research and tool reference](docs/agent-memory.md).
+
+The general wiki interface provides read-only search, reads, metadata, and backlinks for three callers:
 
 - MCP clients, through `mcp-server-lib`
 - Emacs users, through minibuffer commands
@@ -53,11 +52,11 @@ edits.
 
 ## Current Scope
 
-This repository implements the read-only surface of the wiki. It does
-not yet implement source ingest, node creation, node mutation, lint
+The general wiki API implements reads. The dedicated agent memory API can
+create, update and forget managed memory records. General source ingest,
+arbitrary node creation and mutation, lint
 repair, transaction logging, raw artifact registration, source embedding pipelines,
-or recovery. Those are mutation-side concerns described in the
-architecture document.
+and recovery are outside the general wiki API.
 
 What is implemented here:
 
@@ -74,9 +73,7 @@ What is implemented here:
 - tests, fuzzing, coverage gates, benchmarks, formatting, linting, and
   Nix/CI integration
 
-The read-only boundary is deliberate. It makes the package safe to use
-against a personal corpus while proving the assumptions the write side
-will depend on.
+The general wiki tools read the curated corpus. Agent memory writes are limited to plugin-managed files under `agent-memory/`.
 
 ## Data Model
 
@@ -112,6 +109,7 @@ Supported `:WIKI_KIND:` values are:
 - `Question`
 - `Source-Record`
 - `Frozen`
+- `Memory`
 - `Index`
 
 For a file node, put the drawer at the start of the file. Use `#+title`
@@ -137,11 +135,12 @@ wiki heading.
 
 ## Implementation
 
-The package is split into six modules.
+The package is split into seven modules.
 
 | File | Role |
 | --- | --- |
 | `org-wiki.el` | Data core: node predicates, candidate discovery, search, reads, metadata, backlinks, ID normalization, and structured errors. |
+| `org-wiki-memory.el` | Scoped durable memory and the dedicated agent MCP endpoint. |
 | `org-wiki-health.el` | Deterministic, read-only structural health diagnostics. |
 | `org-wiki-mcp.el` | Read-only MCP tool registration around the data core. |
 | `org-wiki-commands.el` | Interactive Emacs commands with optional consult previews and embark actions. |
@@ -414,7 +413,7 @@ The following are intentionally outside this repository's current
 surface:
 
 - source ingest and raw artifact management
-- creation, patching, merging, or deletion of wiki nodes
+- general creation, patching, merging, or deletion of curated wiki nodes
 - semantic lint and lint-repair tools
 - write-ahead logging, crash recovery, file locks, and transaction
   replay

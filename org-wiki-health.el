@@ -41,6 +41,7 @@
   "Return the health-check data for the wiki node at point."
   (append (org-wiki--node-at-point-summary)
           (list :links (org-wiki--id-links-in-node)
+                :memory-source (org-entry-get nil "MEMORY_SOURCE")
                 :source-ids (split-string
                              (or (org-entry-get nil "SOURCE_IDS") "")
                              "[ \t]*,[ \t]*" t)
@@ -113,6 +114,10 @@ LLM calls and never modifies the corpus."
           (push (org-wiki--health-issue
                  "missing_summary" node "Summary section is empty or absent")
                 issues))
+        (when (and (equal kind "Memory")
+                   (string-empty-p (or (plist-get node :memory-source) "")))
+          (push (org-wiki--health-issue "missing_memory_source" node
+                                        "Memory lacks host and session provenance") issues))
         (if (equal kind "Source-Record")
             (progn
               (unless (plist-get node :roam-refs)
@@ -136,7 +141,7 @@ LLM calls and never modifies the corpus."
                        "source_without_links" node
                        "Source-Record links to no derived or related node")
                       issues)))
-          (when (and normalized-id
+          (when (and normalized-id (not (equal kind "Memory"))
                      (zerop (gethash normalized-id inbound 0)))
             (push (org-wiki--health-issue
                    "orphan_node" node "No wiki node links to this node")

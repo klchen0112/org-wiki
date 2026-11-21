@@ -21,7 +21,7 @@
 
 (require 'undercover)
 
-(undercover "org-wiki.el" "org-wiki-mcp.el" "org-wiki-qmd.el"
+(undercover "org-wiki.el" "org-wiki-mcp.el" "org-wiki-qmd.el" "org-wiki-memory.el"
             (:report-format 'lcov)
             (:report-file "coverage/lcov.info")
             (:send-report nil))

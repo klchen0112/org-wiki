@@ -1,0 +1,8 @@
+{
+  "name": "org-wiki-memory-client",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./index.js",
+  "bin": { "org-wiki-memory-stdio": "./stdio.js" },
+  "dependencies": { "@modelcontextprotocol/sdk": "1.32.1" }
+}

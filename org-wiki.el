@@ -5,7 +5,7 @@
 ;; Author: John Wiegley <johnw@gnu.org>
 ;; Created: 14 May 2026
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (org "9.6") (org-roam "2.2") (org-ql "0.7") (mcp-server-lib "0.1"))
+;; Package-Requires: ((emacs "29.1") (org "9.6") (org-roam "2.2") (org-ql "0.7") (mcp-server-lib "0.4"))
 ;; Keywords: outlines hypermedia
 ;; URL: https://github.com/jwiegley/dot-emacs
 
@@ -99,7 +99,7 @@ Read discovery can also include wiki nodes indexed elsewhere by org-roam."
 
 (defcustom org-wiki-kinds
   '("Concept" "Entity" "Topic" "Comparison" "Question"
-    "Source-Record" "Frozen" "Index")
+    "Source-Record" "Frozen" "Index" "Memory")
   "Permitted values for the `:WIKI_KIND:' property."
   :type '(repeat string)
   :group 'org-wiki)
@@ -552,6 +552,13 @@ Signal `org-wiki-error' for an unknown ID, stale location or invalid alias."
       (org-with-wide-buffer
        (org-wiki--goto-id id)))))
 
+(defun org-wiki--read-bounds ()
+  "Return the validated file or subtree bounds at point."
+  (when (org-wiki-node-p)
+    (save-restriction
+      (when (org-at-heading-p) (org-narrow-to-subtree))
+      (cons (point-min) (point-max)))))
+
 ;;;###autoload
 (defun org-wiki-read-node (id)
   "Return the full body of the wiki node with ID as a plain-text string.
@@ -564,10 +571,9 @@ see `org-wiki-canonical-id'.  Signal `org-wiki-error' for unknown nodes."
     (with-current-buffer (org-wiki--node-buffer file)
       (org-with-wide-buffer
        (org-wiki--goto-id id)
-       (unless (org-wiki-node-p)
-         (signal 'org-wiki-error (list :not_a_wiki_node id)))
-       (when (org-at-heading-p) (org-narrow-to-subtree))
-       (buffer-substring-no-properties (point-min) (point-max))))))
+       (let ((bounds (org-wiki--cached-node-data #'org-wiki--read-bounds)))
+         (unless bounds (signal 'org-wiki-error (list :not_a_wiki_node id)))
+         (buffer-substring-no-properties (car bounds) (cdr bounds)))))))
 
 (defun org-wiki--entry-metadata ()
   "Collect standard properties at point, excluding integrity hashes."
