@@ -284,12 +284,12 @@ Child summary with [[id:file-node][a link back]].
        (should (equal (org-wiki-canonical-id "file-node") "file-node-child"))
        (should (= 1 (length (org-wiki--text-search "" files))))
        (org-entry-put nil "WIKI_KIND" "Index")
-       (should (equal (plist-get (org-wiki-node-metadata "file-node") :wiki_kind) "Index"))
+       (should (equal (plist-get (org-wiki-node-metadata "file-node") :wiki_kind) "relationship"))
        (search-forward "File title")
        (replace-match "Renamed")
        (let ((hit (car (org-wiki--text-search "Renamed" files))))
          (should (equal (plist-get hit :id) "file-node"))
-         (should (equal (plist-get hit :kind) "Index"))
+         (should (equal (plist-get hit :kind) "relationship"))
          (should (equal (plist-get hit :title) "Renamed")))))))
 
 (ert-deftest org-wiki-test-file-node-semantic-owner ()
@@ -1205,6 +1205,15 @@ Uses a unique server-id to avoid colliding with any existing tools."
   (let ((prop (org-wiki--hash-property-name)))
     (should (stringp prop))
     (should (string-prefix-p "HASH_" prop))))
+
+(ert-deftest org-wiki-relationship-kinds ()
+  (dolist (kind '("Comparison" "Question" "Index" "relationship"))
+    (with-temp-buffer
+      (insert ":PROPERTIES:\n:ID: rel\n:WIKI_KIND: " kind "\n:END:\n#+title: Links\n")
+      (delay-mode-hooks (org-mode))
+      (goto-char (point-min))
+      (should (equal (plist-get (org-wiki--summarize-entry) :kind) "relationship"))
+      (should (equal (plist-get (org-wiki--entry-metadata) :wiki_kind) "relationship")))))
 
 (provide 'org-wiki-test)
 ;;; org-wiki-test.el ends here

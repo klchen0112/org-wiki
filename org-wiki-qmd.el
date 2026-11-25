@@ -8,7 +8,7 @@
 
 ;;; Commentary:
 
-;; Node-grained Markdown caches bridge qmd 2.8.3 to canonical Org IDs.
+;; Node-grained Markdown caches bridge qmd to canonical Org IDs.
 ;; Searches never maintain indexes.  Explicit maintenance uses an owned
 ;; config/database, a cross-process lock, and a durable commit marker.
 ;; Knowledge-base files are never written or exported through Org hooks.
@@ -76,7 +76,10 @@ queries never download models or silently change embedding models."
   :type 'plist :group 'org-wiki-qmd)
 
 (defconst org-wiki-qmd--version "2.8.3"
-  "Version whose CLI and JSON contract have been verified.")
+  "Baseline CLI version used by packaged builds.")
+
+(defconst org-wiki-qmd--versions (delete-dups (list org-wiki-qmd--version "2.9.0"))
+  "Versions verified by the qmd CLI integration checks.")
 
 (defvar org-wiki-qmd--lock-token nil
   "Token for the current maintenance lock, dynamically bound.")
@@ -168,7 +171,7 @@ Malformed JSON signals an error instead of implying an empty index."
   "Require the owned, unchanged qmd configuration."
   (let ((setup (org-wiki-qmd--read "setup.json")))
     (unless (and setup
-                 (equal (plist-get setup :version) org-wiki-qmd--version)
+                 (member (plist-get setup :version) org-wiki-qmd--versions)
                  (equal (plist-get setup :config)
                         (org-wiki-qmd--digest (concat "config/" (org-wiki-qmd--index) ".yml"))))
       (user-error "QMD configuration changed or setup incomplete; run setup"))))
@@ -429,7 +432,7 @@ Include saved SCRIPT text when the node references a verification script."
   (let ((title (if (org-at-heading-p) (org-get-heading t t t t)
                  (org-wiki--file-title file)))
         (level (org-outline-level))
-        (kind (org-entry-get nil "WIKI_KIND"))
+        (kind (org-wiki--canonical-kind (org-entry-get nil "WIKI_KIND")))
         (body (org-wiki--owned-body)))
     (with-temp-buffer
       (insert body)
@@ -536,27 +539,28 @@ This function starts no external processes and creates no files."
 
 (defun org-wiki-qmd--setup ()
   "Prepare an owned collection under the maintenance lock."
-  (let ((version (string-trim (org-wiki-qmd--run '("--version") 10))))
-    (unless (string-match-p (concat "\\b" (regexp-quote org-wiki-qmd--version) "\\b") version)
-      (error "Unsupported qmd version %s; expected %s" version org-wiki-qmd--version)))
-  (make-directory (org-wiki-qmd--path "config") t)
-  (make-directory (org-wiki-qmd--path "qmd") t)
-  (make-directory (org-wiki-qmd--path "nodes") t)
-  ;; JSON is valid YAML.  Generate only our collection, with no update hooks.
-  ;; Rewriting the same config also repairs setup interrupted after creation.
-  (let* ((config (concat "config/" (org-wiki-qmd--index) ".yml"))
-         (collections (make-hash-table :test #'equal))
-         (unchanged (condition-case nil
-                        (progn (org-wiki-qmd--check-setup) t)
-                      (error nil))))
-    (unless unchanged
-      (org-wiki-qmd--write "state.json" (list :status "updating"))
-      (puthash org-wiki-qmd-collection
-               (list :path (org-wiki-qmd--path "nodes") :pattern "*.md") collections)
-      (org-wiki-qmd--write config (list :collections collections))
-      (org-wiki-qmd--run '("update") org-wiki-qmd-maintenance-timeout)
-      (org-wiki-qmd--write "setup.json" (list :version org-wiki-qmd--version
-                                              :config (org-wiki-qmd--digest config))))))
+  (let* ((output (string-trim (org-wiki-qmd--run '("--version") 10)))
+         (version (cadr (split-string output))))
+    (unless (member version org-wiki-qmd--versions)
+      (error "Unsupported qmd version: %s" output))
+    (make-directory (org-wiki-qmd--path "config") t)
+    (make-directory (org-wiki-qmd--path "qmd") t)
+    (make-directory (org-wiki-qmd--path "nodes") t)
+    ;; JSON is valid YAML.  Generate only our collection, with no update hooks.
+    ;; Rewriting the same config also repairs setup interrupted after creation.
+    (let* ((config (concat "config/" (org-wiki-qmd--index) ".yml"))
+           (collections (make-hash-table :test #'equal))
+           (unchanged (condition-case nil
+                          (progn (org-wiki-qmd--check-setup) t)
+                        (error nil))))
+      (unless unchanged
+        (org-wiki-qmd--write "state.json" (list :status "updating"))
+        (puthash org-wiki-qmd-collection
+                 (list :path (org-wiki-qmd--path "nodes") :pattern "*.md") collections)
+        (org-wiki-qmd--write config (list :collections collections))
+        (org-wiki-qmd--run '("update") org-wiki-qmd-maintenance-timeout))
+      (unless (and unchanged (equal version (plist-get (org-wiki-qmd--read "setup.json") :version)))
+        (org-wiki-qmd--write "setup.json" (list :version version :config (org-wiki-qmd--digest config)))))))
 
 ;;;###autoload
 (defun org-wiki-qmd-setup ()

@@ -105,15 +105,16 @@ Supported `:WIKI_KIND:` values are:
 - `Concept`
 - `Entity`
 - `Topic`
-- `Comparison`
-- `Question`
+- `relationship` for comparisons, questions linking related nodes, and indexes
 - `Source-Record`
 - `Frozen`
 - `道` for a general regularity distilled from experience
 - `法` for a design criterion
 - `术` for a concrete implementation
 - `Memory` for a raw observation
-- `Index`
+
+Search, metadata, and qmd export report the old `Comparison`, `Question`,
+and `Index` kinds as `relationship`.
 
 For a file node, put the drawer at the start of the file. Use `#+title`
 for its display title and a top-level `* Summary` for its summary.
@@ -175,8 +176,9 @@ is honored across the corpus.
 
 qmd is an optional external program. Search is disabled by default and
 ordinary installation and tests do not need it. The adapter supports the
-verified qmd **2.8.3** CLI contract. Install that version separately, then
-load the integration and choose a dedicated collection:
+verified qmd **2.8.3** and **2.9.0** CLI versions. Install either version.
+For an npm installation, include Node.js on the Emacs process's `PATH` so
+that qmd can start. Load the integration and choose a dedicated collection:
 
 ```elisp
 (require 'org-wiki-qmd)
@@ -444,7 +446,7 @@ Common targets:
 | --- | --- |
 | `make build` | Byte-compile package and tests with warnings as errors. |
 | `make test` | Run the ERT suite. |
-| `make test-qmd-integration` | Check the real qmd 2.8.3 CLI in isolated temporary indexes, without models. |
+| `make test-qmd-integration` | Check the installed qmd CLI in isolated temporary indexes, without models. |
 | `make test-qmd-semantic` | Also check real vector and hybrid search using predownloaded models. |
 | `make lint` | Run checkdoc, package-lint, relint, and check-declare. |
 | `make format` | Format Elisp, shell scripts, and Nix files. |

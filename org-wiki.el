@@ -100,8 +100,12 @@ Read discovery can also include wiki nodes indexed elsewhere by org-roam."
 (defconst org-wiki-memory-kinds '("道" "法" "术" "Memory")
   "Kinds for distilled memories and raw observations.")
 
+(defun org-wiki--canonical-kind (kind)
+  "Return the current wiki kind for the stored KIND."
+  (if (member kind '("Comparison" "Question" "Index")) "relationship" kind))
+
 (defcustom org-wiki-kinds
-  (append '("Concept" "Entity" "Topic" "Comparison" "Question" "Source-Record" "Frozen" "Index")
+  (append '("Concept" "Entity" "Topic" "relationship" "Source-Record" "Frozen")
           (copy-sequence org-wiki-memory-kinds))
   "Permitted values for the `:WIKI_KIND:' property."
   :type '(repeat string)
@@ -355,7 +359,7 @@ spike just won't strip a hash from `node-metadata' output."
   (list :id (org-entry-get nil "ID")
         :title (if (org-at-heading-p) (org-entry-get nil "ITEM")
                  (org-wiki--file-title))
-        :kind (org-entry-get nil "WIKI_KIND")
+        :kind (org-wiki--canonical-kind (org-entry-get nil "WIKI_KIND"))
         :file buffer-file-name
         :summary (org-wiki--extract-summary)))
 
@@ -601,7 +605,8 @@ see `org-wiki-canonical-id'.  Signal `org-wiki-error' for unknown nodes."
   "Collect standard properties at point, excluding integrity hashes."
   (cl-loop for (key . value) in (org-entry-properties nil 'standard)
            unless (string-prefix-p "HASH_" key t)
-           append (list (intern (concat ":" (downcase key))) value)))
+           append (list (intern (concat ":" (downcase key)))
+                        (if (equal key "WIKI_KIND") (org-wiki--canonical-kind value) value))))
 
 ;;;###autoload
 (defun org-wiki-node-metadata (id)

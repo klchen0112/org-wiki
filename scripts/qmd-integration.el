@@ -4,7 +4,7 @@
 
 ;;; Commentary:
 
-;; Run make test-qmd-integration with qmd 2.8.3 on PATH.  No models or
+;; Run make test-qmd-integration with qmd 2.8.3 or 2.9.0 on PATH.  No models or
 ;; network are needed.  The semantic target additionally requires local
 ;; GGUF paths in ORG_WIKI_QMD_EMBED_MODEL, ORG_WIKI_QMD_GENERATE_MODEL,
 ;; and ORG_WIKI_QMD_RERANK_MODEL.  User indexes/configs are never used.
