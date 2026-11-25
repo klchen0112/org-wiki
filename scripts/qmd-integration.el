@@ -15,6 +15,7 @@
 (require 'org-wiki-mcp)
 (require 'org-wiki-gptel)
 (require 'org-wiki-commands)
+(require 'org-wiki-memory)
 
 (org-wiki-qmd-test--fixture
  (let ((org-wiki-qmd-search-timeout 120)
@@ -100,5 +101,34 @@
    (org-wiki-qmd-sync)
    (should-not (org-wiki-qmd--search "Child" 10))
    (princ "qmd integration: isolated setup, sync, search, interfaces, recovery and deletion passed\n")))
+
+(org-wiki-qmd-test--fixture
+ (let* ((workspace (expand-file-name "project" base))
+        (ctx `((project . ,(expand-file-name ".git" workspace)) (workspace . ,workspace)
+               (host . "pi") (session . "fixture") (request . "save")))
+        (args '((title . "Isolation check") (summary . "Verify project visibility")
+                (category . "lesson") (kind . "术") (script_path . "verify.sh")
+                (body . "Run sh verify.sh and check the exit status."))))
+   (should (zerop (call-process "git" nil nil nil "init" "-q" workspace)))
+   (with-temp-file (expand-file-name "verify.sh" workspace) (insert "echo isolatedmarker\n"))
+   (let ((saved (org-wiki-memory--call "remember" ctx args)))
+     (dolist (kind '("道" "法"))
+       (org-wiki-memory--call "remember" (cons (cons 'request kind) ctx)
+                              `((kind . ,kind) (title . "Isolation") (summary . "Project isolation")
+                                (body . "Project boundaries") (category . "lesson"))))
+     (org-wiki-qmd-setup)
+     (org-wiki-qmd-sync)
+     (cl-letf (((symbol-function 'org-wiki-memory--text-search)
+                (lambda (&rest _) (error "Unexpected literal fallback"))))
+       (dolist (example '(("understand" "道") ("design" "法") ("implement" "术")))
+         (let ((rows (org-wiki-memory--call "search" ctx
+                                            `((query . "isolation") (situation . ,(car example)) (limit . 1)))))
+           (should (equal (plist-get (aref rows 0) :kind) (cadr example)))))
+       (let* ((result (org-wiki-memory--dispatch "search" (json-encode ctx)
+                                                 "{\"query\":\"isolatedmarker\",\"kind\":\"术\"}"))
+              (rows (json-parse-string result :object-type 'plist :array-type 'list)))
+         (should (equal rows (list (org-wiki-memory--search-result saved))))
+         (should-not (string-match-p "isolatedmarker" result))))
+     (princ "qmd integration: script body matched, only scoped memory metadata returned\n"))))
 
 ;;; qmd-integration.el ends here

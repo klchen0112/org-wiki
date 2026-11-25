@@ -752,28 +752,29 @@ depend on org-hash being loaded — it is optional at runtime."
 
 ;;;; --- Backlinks ---------------------------------------------------
 
+(declare-function org-roam-backlink-create "org-roam-mode" (&rest args) t)
+(declare-function org-roam-node-create "org-roam-node" (&rest args) t)
+
+(defun org-wiki-test--sample-backlinks ()
+  "Make a backlink with the same record types returned by the Org-roam DB."
+  (require 'org-roam)
+  (list (org-roam-backlink-create
+         :source-node (org-roam-node-create :id "a23b4c5d-6e7f-8901-2345-67890abcdef0"
+                                            :title "Andrej Karpathy" :file "/tmp/ak.org"))))
+
 (ert-deftest org-wiki-test-backlinks-plist-shape ()
   "`org-wiki--backlinks' returns :from-id/:from-title/:from-file plists.
 org-roam itself is stubbed: this pins the plist shape that both the
 MCP backlinks tool and `org-wiki-backlinks' consume, including the
 :from-file key the interactive command uses to visit linkers without
 an org-id locations lookup."
-  (cl-letf (((symbol-function 'org-roam-node-from-id)
-             (lambda (_id) 'fake-node))
-            ((symbol-function 'org-roam-backlinks-get)
-             (lambda (_node) '(fake-backlink)))
-            ((symbol-function 'org-roam-backlink-source-node)
-             (lambda (_bl) 'fake-src))
-            ((symbol-function 'org-roam-node-id)
-             (lambda (_src) "a23b4c5d-6e7f-8901-2345-67890abcdef0"))
-            ((symbol-function 'org-roam-node-title)
-             (lambda (_src) "Andrej Karpathy"))
-            ((symbol-function 'org-roam-node-file)
-             (lambda (_src) "/tmp/ak.org")))
-    (should (equal (org-wiki--backlinks "4f1c3b8e-9ad2-4b7e-9d04-1a5e6f7c8b91")
-                   '((:from-id "a23b4c5d-6e7f-8901-2345-67890abcdef0"
-                               :from-title "Andrej Karpathy"
-                               :from-file "/tmp/ak.org"))))))
+  (let ((edges (org-wiki-test--sample-backlinks)))
+    (cl-letf (((symbol-function 'org-roam-node-from-id) (lambda (_id) 'fake-node))
+              ((symbol-function 'org-roam-backlinks-get) (lambda (_node) edges)))
+      (should (equal (org-wiki--backlinks "4f1c3b8e-9ad2-4b7e-9d04-1a5e6f7c8b91")
+                     '((:from-id "a23b4c5d-6e7f-8901-2345-67890abcdef0"
+                                 :from-title "Andrej Karpathy"
+                                 :from-file "/tmp/ak.org")))))))
 
 ;;;; --- Two-id normalization (file-level alias) ---------------------
 
@@ -912,19 +913,10 @@ would return a misleading empty list; the roam query must receive
 the canonical heading id."
   (org-wiki-test-with-fixtures
    (org-wiki-test--write-double-id-fixture)
-   (let (queried)
+   (let ((edges (org-wiki-test--sample-backlinks)) queried)
      (cl-letf (((symbol-function 'org-roam-node-from-id)
                 (lambda (id) (push id queried) 'fake-node))
-               ((symbol-function 'org-roam-backlinks-get)
-                (lambda (_node) '(fake-backlink)))
-               ((symbol-function 'org-roam-backlink-source-node)
-                (lambda (_bl) 'fake-src))
-               ((symbol-function 'org-roam-node-id)
-                (lambda (_src) "a23b4c5d-6e7f-8901-2345-67890abcdef0"))
-               ((symbol-function 'org-roam-node-title)
-                (lambda (_src) "Andrej Karpathy"))
-               ((symbol-function 'org-roam-node-file)
-                (lambda (_src) "/tmp/ak.org")))
+               ((symbol-function 'org-roam-backlinks-get) (lambda (_node) edges)))
        (let ((via-file (org-wiki--backlinks org-wiki-test--file-level-id))
              (via-heading (org-wiki--backlinks org-wiki-test--heading-id)))
          (should via-file)

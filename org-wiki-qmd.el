@@ -20,6 +20,7 @@
 (require 'url-util)
 
 (declare-function org-roam-db-query "org-roam-db")
+(declare-function org-wiki-memory--script-file "org-wiki-memory" (file root path))
 
 (defgroup org-wiki-qmd nil
   "Optional local qmd search."
@@ -415,9 +416,16 @@ Reject unsaved visiting buffers, including buffers visiting symlinks."
       (error "QMD sync: unsaved buffer for %s" file)))
   (with-temp-buffer (insert-file-contents file) (buffer-string)))
 
-(defun org-wiki-qmd--markdown (&optional file)
+(defun org-wiki-qmd--script-file (file)
+  "Return the checked path of a script referenced by the memory node in FILE."
+  (when (and (not (org-at-heading-p)) (member (org-entry-get nil "WIKI_KIND") org-wiki-memory-kinds)
+             (org-entry-get nil "SCRIPT_PATH"))
+    (require 'org-wiki-memory)
+    (org-wiki-memory--script-file file (org-entry-get nil "SCRIPT_ROOT") (org-entry-get nil "SCRIPT_PATH"))))
+
+(defun org-wiki-qmd--markdown (&optional file script)
   "Render the wiki node at point as inert Markdown, using FILE for its name.
-Retain text, code and link labels; never invoke an Org exporter."
+Include saved SCRIPT text when the node references a verification script."
   (let ((title (if (org-at-heading-p) (org-get-heading t t t t)
                  (org-wiki--file-title file)))
         (level (org-outline-level))
@@ -459,7 +467,8 @@ Retain text, code and link labels; never invoke an Org exporter."
           (delete-region (car edit) (nth 1 edit))
           (insert (nth 2 edit))))
       (concat "# " title "\n\nKind: " kind "\n\n"
-              (string-trim (buffer-string)) "\n"))))
+              (string-trim (buffer-string)) "\n"
+              (when script (concat "\n" script))))))
 
 (defun org-wiki-qmd--snapshot (files)
   "Build a validated in-memory snapshot of saved FILES.
@@ -475,11 +484,15 @@ Return nodes and file hashes; report and exclude all duplicate IDs."
           (dolist (pos (org-wiki--node-positions))
             (goto-char pos)
             (if-let* ((id (org-entry-get nil "ID")))
-                (let* ((markdown (org-wiki-qmd--markdown file))
+                (let* ((script-file (org-wiki-qmd--script-file file))
+                       (script (when script-file (org-wiki-qmd--source-text script-file)))
+                       (markdown (org-wiki-qmd--markdown file script))
                        (node (list :id id :file file
                                    :path (concat (secure-hash 'sha256 id) ".md")
                                    :hash (secure-hash 'sha256 markdown)
                                    :text markdown)))
+                  (when script-file
+                    (push (list :file script-file :hash (secure-hash 'sha256 script)) sources))
                   (puthash id (cons node (gethash id by-id)) by-id))
               (push (format "Missing ID: %s:%s" file (line-number-at-pos))
                     org-wiki-qmd--diagnostics))))))
@@ -682,11 +695,13 @@ Reject stale bodies, dirty visiting buffers, and conflicting live ID locations."
           (error "QMD source changed during validation"))
         (save-excursion
           (unless (equal id (org-wiki--goto-id id)) (error "Non-canonical qmd ID"))
-          (unless (and (equal id (org-entry-get nil "ID"))
-                       (org-wiki-node-p)
-                       (equal (plist-get node :hash)
-                              (secure-hash 'sha256 (org-wiki-qmd--markdown))))
-            (error "Stale qmd node: %s" id))
+          (let* ((script-file (org-wiki-qmd--script-file file))
+                 (script (when script-file (org-wiki-qmd--source-text script-file))))
+            (unless (and (equal id (org-entry-get nil "ID"))
+                         (org-wiki-node-p)
+                         (equal (plist-get node :hash)
+                                (secure-hash 'sha256 (org-wiki-qmd--markdown file script))))
+              (error "Stale qmd node: %s" id)))
           (when-let* ((old (and (hash-table-p org-id-locations) (gethash id org-id-locations))))
             (when (and (file-exists-p old) (not (equal file (file-truename old)))
                        (org-wiki-qmd--file-has-node-p old id))
@@ -709,11 +724,13 @@ Reject stale bodies, dirty visiting buffers, and conflicting live ID locations."
                           (equal (org-wiki-qmd--index) "index"))))
         (match-string 2 file)))))
 
-(defun org-wiki-qmd--search (query k)
+(defun org-wiki-qmd--search (query k &optional select)
   "Return verified summaries for QUERY, at most K, in qmd rank order.
-Signal when unready; the core owns fallback.  User quits propagate."
+When supplied, SELECT takes a manifest node and returns a verified result
+or nil to skip the candidate.  Signal when unready.  User quits propagate."
   (org-wiki-qmd--validate-config)
-  (let* ((ready (org-wiki-qmd--ready))
+  (let* ((select (or select #'org-wiki-qmd--validate-node))
+         (ready (org-wiki-qmd--ready))
          (deadline (+ (float-time) org-wiki-qmd-search-timeout))
          (limit (min 1000 (max 20 (* 4 k))))
          (maximum (min 1000 (max 100 (* 10 k))))
@@ -739,7 +756,8 @@ Signal when unready; the core owns fallback.  User quits propagate."
             (unless (gethash id seen)
               (puthash id t seen)
               (condition-case nil
-                  (push (org-wiki-qmd--validate-node node) results)
+                  (when-let* ((result (funcall select node)))
+                    (push result results))
                 (error nil)))))
         (setq results (nreverse results))
         (if (or (>= (length results) k) (< (length hits) limit) (>= limit maximum))

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { once } from "node:events";
-import { mkdtemp, mkdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -17,15 +17,21 @@ test("Pi, DSH and a scoped stdio client use one saved corpus", { timeout: 60000 
   const dir = await mkdtemp(path.join(tmpdir(), "org-memory-"));
   const cwd = path.join(dir, "project");
   const other = path.join(dir, "other");
-  await Promise.all([mkdir(cwd), mkdir(other)]);
+  const wiki = path.join(dir, "wiki");
+  await Promise.all([mkdir(cwd), mkdir(other), mkdir(wiki)]);
+  await writeFile(path.join(wiki, "checks.org"),
+    ":PROPERTIES:\n:ID: acceptance-check\n:ROAM_ALIASES: \"make check\"\n:END:\n#+title: Project acceptance\n");
   const socket = path.join(dir, "test-server");
   process.env.ORG_WIKI_MEMORY_SOCKET = socket;
   delete process.env.ORG_WIKI_MEMORY_BRIDGE;
-  const setup = `(progn (require 'server) (require 'org-wiki-memory)
+  const setup = `(progn (require 'server) (require 'org-wiki-memory) (require 'org-roam)
     (setq org-wiki-root (expand-file-name "wiki" (getenv "MEMORY_TEST_DIR"))
+          org-roam-directory org-wiki-root
+          org-roam-db-location (expand-file-name "roam.sqlite" (getenv "MEMORY_TEST_DIR"))
+          org-id-prefix "org[test]"
           org-id-locations-file (expand-file-name "ids" (getenv "MEMORY_TEST_DIR"))
           server-socket-dir (getenv "MEMORY_TEST_DIR") server-name "test-server")
-    (org-wiki-memory-enable) (server-start)
+    (org-roam-db-sync) (org-wiki-memory-enable) (server-start)
     (while t (accept-process-output nil 0.1)))`;
   const emacs = spawn("emacs", ["-Q", "--batch", "-L", process.cwd(), "--eval", setup],
     { env: { ...process.env, MEMORY_TEST_DIR: dir }, stdio: ["ignore", "ignore", "pipe"] });
@@ -47,10 +53,27 @@ test("Pi, DSH and a scoped stdio client use one saved corpus", { timeout: 60000 
   const piCtx = { cwd, sessionManager: { getSessionId: () => "pi-session", getBranch: () => [] } };
   const exec = { agent: { session: { header: { cwd }, id: "dsh-session" } }, signal: new AbortController().signal };
   const record = { title: "项目验收", summary: "用 make check 验收", category: "decision", body: "Run make check." };
-  const save = () => piTools.get("org_memory_remember").execute("save", record, exec.signal, null, piCtx);
+  const script = "printf '%s\\n' verification_marker\n";
+  await writeFile(path.join(cwd, "verify.sh"), script);
+  const save = () => piTools.get("org_memory_remember").execute("save",
+    { ...record, kind: "术", script_path: "verify.sh" }, exec.signal, null, piCtx);
   const { details: saved } = await save();
+  assert.match(saved.id, /^org\[test\]:[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i);
+  const linkTo = id => "[[id:" + id.replace("org[test]", "org\\[test\\]") + "]]";
   assert.equal(saved.title, record.title);
+  assert.deepEqual(saved.related_ids, ["acceptance-check"]);
   assert.equal((await save()).details.id, saved.id);
+  const search = (args, ctx = piCtx) => piTools.get("org_memory_search").execute("search", args, exec.signal, null, ctx);
+  assert.deepEqual((await search({ kind: "术", category: "decision" })).details.map(row => row.id), [saved.id]);
+  assert.deepEqual((await search({ kind: "道" })).details, []);
+  assert.deepEqual((await search({ query: "verification_marker" }, { ...piCtx, cwd: other })).details, []);
+  const recalled = await piHooks.get("before_agent_start")({ prompt: "verification_marker", messageType: "user" }, piCtx);
+  assert.ok(recalled.message.content.includes(linkTo(saved.id)));
+  assert.match(recalled.message.content, /verify\.sh/);
+  assert.doesNotMatch(recalled.message.content, /verification_marker/);
+  const expanded = JSON.parse(await dshTools.get("org_memory_read").execute({ id: saved.id, include_script: true }, exec));
+  assert.deepEqual(expanded.related_ids, saved.related_ids);
+  assert.equal(expanded.script_content, script);
   if (process.env.ORG_WIKI_TEST_PI) {
     const invocation = promisify(execFile)(process.env.ORG_WIKI_TEST_PI, [
       "--offline", "--mode", "json", "--no-session", "--no-approve", "-ne", "-ns", "-np", "-nc",
@@ -93,11 +116,13 @@ test("Pi, DSH and a scoped stdio client use one saved corpus", { timeout: 60000 
   const personalAnswer = await piHooks.get("before_agent_start")({ prompt: "评审语言", messageType: "user" },
     { ...piCtx, cwd: other });
   assert.match(personalAnswer.message.content, /中文评审/);
-  assert.ok(personalAnswer.message.content.includes(personal.id));
+  assert.ok(personalAnswer.message.content.includes(linkTo(personal.id)));
   const updated = JSON.parse(await dshTools.get("org_memory_update").execute({
     ...record, summary: "改用 make verify 验收", id: saved.id, expected_revision: saved.revision,
   }, { ...exec, callId: "edit" }));
   const answer = await piHooks.get("before_agent_start")({ prompt: "怎么验收", messageType: "user" }, piCtx);
+  assert.equal(updated.kind, "术");
+  assert.equal(updated.script_path, "verify.sh");
   assert.match(answer.message.content, /make verify/);
   const client = new Client({ name: "test", version: "1" });
   await client.connect(new StdioClientTransport({ command: process.execPath,

@@ -12,7 +12,7 @@ links and metadata, and answer later questions from the accumulated
 wiki. The wiki becomes a durable memory of prior synthesis rather than
 another transient retrieval result.
 
-The optional agent memory module lets Pi and DeepSeek Harness remember, recall, correct, and forget project decisions and personal preferences in the same Org corpus. See the [setup guide, research and tool reference](docs/agent-memory.md).
+The optional agent memory module lets Pi and DeepSeek Harness remember, recall, correct, and forget project decisions and personal preferences in the same Org corpus. Memory writes link mentions of existing Org-roam nodes by ID, including matches on node aliases. See the [setup guide and linking rules](docs/agent-memory.md#写入时关联-org-roam-节点).
 
 The general wiki interface provides read-only search, reads, metadata, and backlinks for three callers:
 
@@ -109,7 +109,10 @@ Supported `:WIKI_KIND:` values are:
 - `Question`
 - `Source-Record`
 - `Frozen`
-- `Memory`
+- `道` for a general regularity distilled from experience
+- `法` for a design criterion
+- `术` for a concrete implementation
+- `Memory` for a raw observation
 - `Index`
 
 For a file node, put the drawer at the start of the file. Use `#+title`

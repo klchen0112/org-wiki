@@ -82,7 +82,7 @@
 (declare-function org-ql-semantic--match-score "ext:org-ql-semantic")
 (declare-function org-hash-property "ext:org-hash")
 (declare-function org-roam-db-query "org-roam-db")
-(declare-function org-wiki-qmd--search "org-wiki-qmd" (query k))
+(declare-function org-wiki-qmd--search "org-wiki-qmd" (query k &optional select))
 (defvar org-roam-db-location)
 
 (defgroup org-wiki nil
@@ -97,9 +97,12 @@ Read discovery can also include wiki nodes indexed elsewhere by org-roam."
   :type 'directory
   :group 'org-wiki)
 
+(defconst org-wiki-memory-kinds '("道" "法" "术" "Memory")
+  "Kinds for distilled memories and raw observations.")
+
 (defcustom org-wiki-kinds
-  '("Concept" "Entity" "Topic" "Comparison" "Question"
-    "Source-Record" "Frozen" "Index" "Memory")
+  (append '("Concept" "Entity" "Topic" "Comparison" "Question" "Source-Record" "Frozen" "Index")
+          (copy-sequence org-wiki-memory-kinds))
   "Permitted values for the `:WIKI_KIND:' property."
   :type '(repeat string)
   :group 'org-wiki)
@@ -180,6 +183,12 @@ for callers."
   (when (file-directory-p org-wiki-root)
     (directory-files-recursively org-wiki-root "\\.org\\'")))
 
+(defun org-wiki--roam-db-ready-p ()
+  "Return non-nil when Org-roam can query an existing database."
+  (and (fboundp 'org-roam-db-query)
+       (bound-and-true-p org-roam-db-location)
+       (file-regular-p org-roam-db-location)))
+
 (defun org-wiki--roam-wiki-files ()
   "Return corpus files holding wiki nodes, per the org-roam DB.
 Identity is property-only (architecture doc §2.1): wiki nodes that
@@ -187,10 +196,7 @@ have drifted outside `org-wiki-root' are still wiki nodes, and the
 roam DB is how reads find them.  Returns nil when org-roam or its
 database is unavailable.  The full-table scan is acceptable at
 personal scale; revisit with a cached view if the corpus grows."
-  (when (and (fboundp 'org-roam-db-query)
-             (boundp 'org-roam-db-location)
-             org-roam-db-location
-             (file-exists-p org-roam-db-location))
+  (when (org-wiki--roam-db-ready-p)
     (ignore-errors
       (let (files)
         (pcase-dolist (`(,file ,properties)
@@ -199,6 +205,19 @@ personal scale; revisit with a cached view if the corpus grows."
           (when (assoc "WIKI_KIND" properties)
             (push file files)))
         (nreverse files)))))
+
+(defun org-wiki--memory-relation-ids ()
+  "Return Org IDs from the managed Relations list in this memory file."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^\\* Relations$" nil t)
+      (let ((end (save-excursion (outline-next-heading) (point)))
+            ids)
+        (while (re-search-forward (concat "^- " org-link-bracket-re "$") end t)
+          (let ((path (org-link-unescape (match-string-no-properties 1))))
+            (when (string-prefix-p "id:" path)
+              (push (substring path 3) ids))))
+        (nreverse ids)))))
 
 (defun org-wiki--candidate-files ()
   "Return all files that may contain wiki nodes.
@@ -422,6 +441,18 @@ though a later in-session load is still picked up via `fboundp'."
         (t (setq org-wiki--semantic-require-failed t)
            nil)))
 
+(defun org-wiki--try-qmd (query k &optional select)
+  "Return up to K qmd hits for QUERY, optionally processed by SELECT.
+Honor the Emacs backend settings and record qmd errors for diagnostics."
+  (when (and (not (string-empty-p query))
+             (memq org-wiki-search-backend '(auto qmd)))
+    (if (not org-wiki-qmd-enabled)
+        (progn (setq org-wiki-qmd-last-error "Search disabled") nil)
+      (condition-case err
+          (progn (require 'org-wiki-qmd)
+                 (org-wiki-qmd--search query k select))
+        (error (setq org-wiki-qmd-last-error (error-message-string err)) nil)))))
+
 (defun org-wiki--search (query &optional k)
   "Search wiki nodes for QUERY, returning up to K (default 10) plists.
 Each result has keys :id :title :kind :file :summary.
@@ -431,16 +462,7 @@ backends.  Errors and empty results fall through to the next backend.
 An empty QUERY uses literal discovery.  User quits always propagate."
   (let* ((k (or k org-wiki-default-search-limit))
          (files (org-wiki--candidate-files))
-         (qmd
-          (when (and (not (string-empty-p query))
-                     (memq org-wiki-search-backend '(auto qmd)))
-            (if (not org-wiki-qmd-enabled)
-                (progn (setq org-wiki-qmd-last-error "Search disabled") nil)
-              (condition-case err
-                  (progn (require 'org-wiki-qmd)
-                         (org-wiki-qmd--search query k))
-                (error (setq org-wiki-qmd-last-error
-                             (error-message-string err)) nil)))))
+         (qmd (org-wiki--try-qmd query k))
          (semantic
           (condition-case nil
               (when (and (not qmd) (not (string-empty-p query))

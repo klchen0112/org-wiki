@@ -23,6 +23,8 @@
 (require 'subr-x)
 (require 'org-wiki)
 
+(declare-function org-roam-db-query "org-roam-db")
+
 (defun org-wiki--id-links-in-node ()
   "Return id-link targets owned by the current file or heading node."
   (save-restriction
@@ -41,12 +43,26 @@
   "Return the health-check data for the wiki node at point."
   (append (org-wiki--node-at-point-summary)
           (list :links (org-wiki--id-links-in-node)
+                :relations (when (and (not (org-at-heading-p)) (org-entry-get nil "MEMORY_SCOPE"))
+                             (org-wiki--memory-relation-ids))
                 :memory-source (org-entry-get nil "MEMORY_SOURCE")
                 :source-ids (split-string
                              (or (org-entry-get nil "SOURCE_IDS") "")
                              "[ \t]*,[ \t]*" t)
                 :roam-refs (org-entry-get nil "ROAM_REFS")
                 :retrieved (org-entry-get nil "RETRIEVED"))))
+
+(defun org-wiki--roam-relation-exists-p (id)
+  "Check an external memory relation against Org-roam and the saved ID."
+  (when (and (require 'org-roam nil t) (org-wiki--roam-db-ready-p))
+    (when-let* ((file (caar (org-roam-db-query [:select file :from nodes :where (= id $s1)] id)))
+                ((file-regular-p file)))
+      (with-current-buffer (org-wiki--node-buffer file)
+        (org-with-wide-buffer
+         (when-let* ((pos (org-find-entry-with-id id)))
+           (goto-char pos)
+           (or (org-at-heading-p) (org-wiki--file-node-p)
+               (not (org-wiki--node-positions)))))))))
 
 (defun org-wiki--normalized-ids (ids)
   "Return IDS lowercased, deduplicated and sorted."
@@ -82,10 +98,12 @@ LLM calls and never modifies the corpus."
         (let ((target (downcase link)))
           (if (gethash target by-id)
               (puthash target (1+ (gethash target inbound 0)) inbound)
-            (push (org-wiki--health-issue
-                   "broken_id_link" node
-                   (format "Unknown or non-canonical wiki id: %s" link))
-                  issues)))))
+            (unless (and (member link (plist-get node :relations))
+                         (ignore-errors (org-wiki--roam-relation-exists-p link)))
+              (push (org-wiki--health-issue
+                     "broken_id_link" node
+                     (format "Unknown or non-canonical wiki id: %s" link))
+                    issues))))))
     (maphash
      (lambda (id matches)
        (when (cdr matches)
@@ -114,7 +132,7 @@ LLM calls and never modifies the corpus."
           (push (org-wiki--health-issue
                  "missing_summary" node "Summary section is empty or absent")
                 issues))
-        (when (and (equal kind "Memory")
+        (when (and (member kind org-wiki-memory-kinds)
                    (string-empty-p (or (plist-get node :memory-source) "")))
           (push (org-wiki--health-issue "missing_memory_source" node
                                         "Memory lacks host and session provenance") issues))
@@ -141,16 +159,20 @@ LLM calls and never modifies the corpus."
                        "source_without_links" node
                        "Source-Record links to no derived or related node")
                       issues)))
-          (when (and normalized-id (not (equal kind "Memory"))
+          (when (and normalized-id (not (member kind org-wiki-memory-kinds))
                      (zerop (gethash normalized-id inbound 0)))
             (push (org-wiki--health-issue
                    "orphan_node" node "No wiki node links to this node")
                   issues))
-          (let* ((declared (org-wiki--normalized-ids
+          (let* (;; Only links outside the generated list are citations.
+                 (citation-links (seq-reduce
+                                  (lambda (rest id) (cl-remove id rest :test #'equal :count 1))
+                                  (plist-get node :relations) links))
+                 (declared (org-wiki--normalized-ids
                             (plist-get node :source-ids)))
                  (cited
                   (org-wiki--normalized-ids
-                   (cl-loop for link in links
+                   (cl-loop for link in citation-links
                             for target = (downcase link)
                             for matches = (gethash target by-id)
                             when (or (string-prefix-p "src-" target)

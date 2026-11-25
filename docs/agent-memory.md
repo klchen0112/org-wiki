@@ -78,19 +78,62 @@ claude mcp add --scope local --transport stdio org-wiki-memory -- /absolute/path
 
 | 工具 | 参数 | 返回值 |
 | --- | --- | --- |
-| `org_memory_remember` | `title, summary, body, category`，可选 `scope` | 含 ID 和内容版本的记录 |
-| `org_memory_search` | `query`，可选 `limit`（1–50，默认 5） | 可见记录的摘要、版本与 ID |
-| `org_memory_read` | `id` | 正文、来源、当前版本 |
-| `org_memory_update` | `id, expected_revision, title, summary, body, category` | 修订后的记录 |
+| `org_memory_remember` | `title, summary, body, category`，可选 `scope, kind, script_path` | 含 ID、内容版本和关联节点 ID 列表 `related_ids` 的记录 |
+| `org_memory_search` | 至少提供 `query, category, kind` 中的一项，可选 `situation` 和 `limit`（1–50，默认 5） | 可见记忆的 ID、范围、类型、类别、标题、摘要、版本及可选脚本路径 |
+| `org_memory_read` | `id`，可选 `include_script` | 正文、来源、当前版本和 `related_ids`，按需附上脚本 |
+| `org_memory_update` | `id, expected_revision, title, summary, body, category`，可选 `kind, script_path` | 含 `related_ids` 的修订记录。省略的可选字段沿用旧值，传 `null` 可清除 |
 | `org_memory_forget` | `id, expected_revision` | ID 和遗忘确认 |
 
 类别为 `fact`、`decision`、`lesson`、`preference`。范围为 `project`（默认）或 `personal`。宿主给后端提供当前会话、工具调用 ID 和工作区。Git worktree 共享同一实际 Git common directory；普通目录以真实路径区分。移动仓库会改变它的项目键。Pi 和 DSH 均从当前会话取路径，适用于同一台机器和同一用户。
 
-一个文件保存一条记忆。新建时记录原始来源，更新时保留原始来源并记录最后编辑的宿主与会话。内容哈希用作版本。更新冲突时先读取最新内容再决定如何修改。插件拒绝覆盖未保存的编辑，使用文件锁和同目录原子替换。遗忘后原文件仅包含操作指纹，可用于辨别重试。已有聊天记录、用户备份和 Git 历史有各自的保留周期。
+一个文件保存一条记忆。新建时 Emacs 在文件头调用 `(org-id-get-create)` 生成 ID，默认使用 UUID，也遵循你的 `org-id-method` 和 `org-id-prefix`。可以把工具返回的 `id` 用于 Org 链接和后续读写。同一创建请求重试时只会保存一份文件。旧记忆继续使用原来的 `mem-…` ID。[文件 ID 与重试规则](agent-memory-design.md#由-org-生成记忆文件-id)
 
-默认召回最多五条、共 2,000 个 UTF-16 代码单元。首轮无匹配时跳过注入。搜索按同范围内的标题、摘要、正文匹配度排序，支持英文词和中文相邻字对。写入后立即可检索，无需启动 qmd 或额外模型。记忆摘要属于背景资料，Pi 将其作为隐藏的自定义消息记入会话，DSH 使用带来源的消息。Emacs 离线时宿主可继续会话，工具写入返回错误；下一次工具调用会重新连接。
+新建时记录原始来源，更新时保留原始来源并记录最后编辑的宿主与会话。内容哈希用作版本。更新冲突时先读取最新内容再决定如何修改。插件拒绝覆盖未保存的编辑，使用文件锁和同目录原子替换。遗忘后文件中仅保留遗忘操作指纹和创建键，用于辨别重试。已有聊天记录、用户备份和 Git 历史有各自的保留周期。
+
+Emacs 为记忆检索和普通 Wiki 搜索共用 `org-wiki-search-backend` 和 `org-wiki-qmd-enabled`。按 [qmd 配置步骤](../README.md#optional-qmd-search) 完成索引初始化和同步后，将后端设为 `auto` 或 `qmd` 并启用 qmd。新写入或编辑的记忆在下次同步后进入 qmd 索引。qmd 关闭、失败或没有可用结果时，Emacs 直接搜索已保存的 Org 文件，按标题、摘要和正文匹配度排序。
+
+Pi 和 DSH 在会话首轮自动检索，最多注入五条摘要，共 2,000 个 UTF-16 代码单元。Pi 将摘要作为隐藏的自定义消息记入会话，DSH 使用带来源的消息。当用户要求记住某件事，或模型判断当前结论值得保存时，模型调用 `org_memory_remember` 才会新建记忆；对已有条目的修订通过 `org_memory_update` 写入。Emacs 离线时宿主可继续会话，工具写入返回错误。下一次工具调用会重新连接。
 
 范围规则在记忆服务上生效。普通 wiki 的五个通用只读工具仍服务于整个个人 Org 语料。需按项目提供记忆的客户端，应只挂载项目绑定的记忆工具。旧 Pi 记忆目录离线保留，切换配置不会导入或删除数据。
+
+## 写入时关联 Org-roam 节点
+
+Pi、DSH 和标准 MCP 客户端保存或修订记忆时，Emacs 会用记忆的标题、摘要和正文匹配已有 Org-roam 节点。写出节点标题、`ROAM_ALIASES` 别名或显式 `id:` 链接即可。匹配在本地使用已建立的 Org-roam 索引，覆盖文件节点和标题节点，包括没有 `WIKI_KIND` 的普通笔记。
+
+假设库中已有 SQLite 节点（ID 为 `sqlite-id`，别名为“嵌入引擎”）和“来源记录”节点（ID 为 `source-id`）。用 `org_memory_remember` 保存下面这条记忆。
+
+```json
+{
+  "title": "离线索引",
+  "summary": "离线索引使用嵌入引擎。",
+  "body": "验证依据见 [[id:source-id][实验]]。",
+  "category": "decision"
+}
+```
+
+正文中的显式 ID 优先于摘要中的别名，所以返回的 `related_ids` 为 `["source-id", "sqlite-id"]`。记忆文件中的链接使用目标节点的标题，每个链接附上命中处的原文片段。
+
+```org
+* Relations
+- [[id:source-id][来源记录]]
+  : 验证依据见 [[id:source-id][实验]]。
+- [[id:sqlite-id][SQLite]]
+  : 离线索引使用嵌入引擎。
+```
+
+如果多个可见节点共用一个名称，Emacs 会跳过这个名称。要指向其中一个，可以在记忆中写明它的 ID。项目记忆可关联本项目记忆、个人记忆和普通笔记。个人记忆可关联个人记忆和普通笔记。逐步匹配规则和过滤示例见[写入时的节点匹配](agent-memory-design.md#写入时的节点匹配)。
+
+每条记忆默认最多保留 **5 个不同目标**。例如，`(setq org-wiki-memory-max-links 1)` 使上例只保留 `source-id`。设为 0 后，新建或修订的记忆会省略自动关系。
+
+用 `org_memory_read` 查看已保存的 `related_ids`。如果记忆文件也在 Org-roam 的索引范围内，还可以打开目标节点，在反链中找到这条记忆。若目标笔记刚改过标题或别名，可先保存该笔记并运行 `M-x org-roam-db-sync`，再更新记忆以重新匹配。
+
+## 分类与验证脚本
+
+每条总结选一个 `kind`，直接存为 Org 属性 `WIKI_KIND`。「道」记通用规律，「法」记设计准则，「术」记具体实施。原始观察和旧客户端省略类型的写入使用 `Memory`。`category` 仍可区分事实、决策、经验和偏好。
+
+检索时用 `query` 写主题，用 `situation` 表达当前任务。以同一个「并发写入」为例，`understand` 优先召回解释冲突成因的「道」，`design` 优先召回如何选择写入策略的「法」，`implement` 优先召回验证并发写入的「术」。Emacs 先找相关候选，再选当前情景的类型；候选中没有该类型时返回其他相关记忆。首轮自动召回从提示中识别明确的情景，意图混合或不明时按相关度排序。显式给出 `kind` 会严格筛选该类型。
+
+实际跑过、值得复现的脚本保存在项目内。已有脚本直接填写仓库相对路径 `script_path`，临时脚本先保存为项目中的独立文件。摘要写验证目的，正文记录命令、预期与实际结果，需要复现特定版本时附提交号。再次验证得到相同结论时复用已有记忆。Emacs 同步 qmd 时索引所引用脚本的当前内容，首轮召回展示摘要和路径。通过 `org_memory_read` 传 `include_script=true` 可按需读取当前脚本。移动工作树或脚本后可以更新引用。
 
 ## 验证与回退
 
