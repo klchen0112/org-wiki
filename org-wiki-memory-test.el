@@ -205,7 +205,7 @@
               (should (equal legacy-row (org-wiki-memory--call "remember" other args)))
               (should (equal legacy-row (org-wiki-memory--call "read" other legacy-key)))
               (should (equal "Changed" (plist-get (org-wiki-memory--call "update" other change) :body)))
-              (should (equal legacy-file (gethash legacy-id org-id-locations))))))
+              (should (file-equal-p legacy-file (gethash legacy-id org-id-locations))))))
       (delete-directory org-wiki-root t))))
 
 (ert-deftest org-wiki-memory-native-file-id-and-retries ()
@@ -222,7 +222,7 @@
               (row (org-wiki-memory--call "remember" ctx args))
               (file (gethash id org-id-locations)))
          (should (equal id (plist-get row :id)))
-         (should (equal (file-name-as-directory dir) (file-name-directory file)))
+         (should (file-equal-p dir (file-name-directory file)))
          (should (string-suffix-p (concat "-!" (secure-hash 'sha256 id) ".org") file))
          (with-temp-buffer
            (insert-file-contents file)
@@ -242,7 +242,7 @@
                   (forget (append args-id (list (cons 'expected_revision (plist-get updated :revision))))))
              (should (equal id (plist-get updated :id)))
              (should (equal updated (org-wiki-memory--call "update" ctx edit)))
-             (should (equal file (car (org-id-find-id-in-file id (org-id-find-id-file id)))))
+             (should (file-equal-p file (car (org-id-find-id-in-file id (org-id-find-id-file id)))))
              (should (equal (should-error (org-wiki-memory--call "remember" ctx args))
                             '(org-wiki-error :request_conflict)))
              (should (plist-get (org-wiki-memory--call "forget" ctx forget) :forgotten))
