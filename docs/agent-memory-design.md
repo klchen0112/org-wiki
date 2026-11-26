@@ -1,45 +1,27 @@
 # Org-wiki 共享记忆设计
 
-Pi、DeepSeek Harness（DSH）及其他 MCP 客户端可以直接读写同一份 Org 记忆。**固定项目优先使用标准 MCP；需要首轮自动召回，或一个宿主同时服务多个工作区时，使用原生插件。** 两种入口共用工具和存储，切换时已有记忆和引用 ID 继续有效。
+## 接入与项目绑定
 
-## 接入方式
+客户端启动 `mcp-server-lib` 提供的 `emacs-mcp-stdio.sh --server-id=<服务名>`，通过本地 Emacs socket 调用五个公开工具：`org_memory_remember`、`org_memory_search`、`org_memory_read`、`org_memory_update` 和 `org_memory_forget`。Pi 和 DSH 使用各自的通用 MCP 客户端按需检索。
 
-| 设计问题 | 标准 MCP | Pi / DSH 原生插件 |
-| --- | --- | --- |
-| 谁决定何时召回？ | Agent 按需调用搜索工具。项目指令可以提示它在依赖历史决定时先查记忆。 | 宿主在首个用户问题进入模型前检索，后续仍可按需调用工具。 |
-| 项目从哪里来？ | stdio 服务启动时绑定一个工作区。建议显式传入项目路径。 | 每次调用从当前会话读取工作区，适合 DSH Web 同时打开多个项目。 |
-| 写入怎样记录来源？ | 记录为 `mcp`，会话标识由 stdio 服务进程生成。 | 记录为 `pi` 或 `dsh`，保留宿主会话 ID。 |
+在 Emacs 配置中调用 `(org-wiki-memory-enable 服务名 工作区)`。注册时固定工作区及规范项目路径。上游 JSON-RPC 入口接收服务名，工具执行期间用动态绑定取得对应的项目上下文。同一个 Emacs 能同时处理多个项目的连接。
 
-例如，在项目 A 用 Pi 保存“提交前运行 `make check`”。绑定到 A 的 DSH MCP 客户端可以在新会话中搜索并读取这条决定；启用 DSH 原生插件后，首轮问“这个项目怎么验收？”就会触发检索。若 DSH Web 的多个会话共用绑定到 A 的 stdio 服务，它们都会使用 A 的项目范围。独立的项目服务或按会话取路径的原生插件都能解决这个问题。
-
-## 从工具调用到 Org 文件
-
-```mermaid
-flowchart LR
-    MCP["标准 MCP 客户端"] --> Stdio["项目绑定的 stdio 服务"]
-    Stdio --> Client["共享记忆客户端"]
-    Pi["Pi 原生扩展"] --> Client
-    DSH["DSH 原生插件"] --> Client
-    Client -->|MCP| Emacs["Emacs · org-wiki-memory"]
-    Emacs --> Files["agent-memory 下的 Org 文件"]
-```
-
-面向模型的接口有五个工具：`org_memory_remember`、`org_memory_search`、`org_memory_read`、`org_memory_update`、`org_memory_forget`。共享客户端补入项目、来源和请求标识，通过 Emacs 的专用 MCP 服务调用内部入口 `org_memory_dispatch`。普通 wiki 的 `wiki_search`、`wiki_read_node` 等工具面向整个 wiki 语料。按项目提供长期记忆时，只向该客户端注册一组 `org_memory_*` 工具。[stdio 入口](../packages/client/stdio.js) · [共享客户端](../packages/client/index.js) · [Emacs 后端](../org-wiki-memory.el)
+写入来源为 `mcp/<服务名>`。客户端可以提供 `request_key` 重试同一请求，省略时由 Emacs 生成 UUID。重放需沿用同一服务名，独立写入应使用不同的键。[接入与迁移指南](agent-memory.md)
 
 ## 存储、召回与纠正
 
 - **存储范围。** 每条记忆有稳定的 Org ID。总结直接以 `WIKI_KIND` 标记为道、法或术，原始观察使用 `Memory`。项目记忆位于 `org-wiki-root/agent-memory/<项目键>/`，可跨项目使用的个人记忆位于同级 `personal/`。项目键取自规范化路径的哈希，同一 Git 仓库的多个 worktree 共用 Git 公共目录，普通目录各自独立。搜索和按 ID 操作都限定在当前项目与个人目录。
-- **文件名。** 新记忆使用 `YYYYMMDDTHHMMSSZ-<12 位哈希>-<ID 后缀>.org`。时间戳为 UTC，短哈希包含记忆内容、会话和请求标识，以区分同一秒内的独立写入。重试和更新沿用已有文件名，旧格式 `<Org ID>.org` 也可以继续使用。
-- **召回。** Emacs 统一选择检索后端。启用 qmd 后，记忆搜索与普通 Wiki 搜索共用索引和后端设置。Emacs 只接受当前项目及个人目录中的记忆，验证原始 Org 记录后按 qmd 排名返回。qmd 关闭、失败或没有可用结果时，Emacs 在同一范围内做文字匹配。Pi 的 `before_agent_start` 和 DSH 的 `agent/pre-step` 调用同一搜索接口，每次首轮最多注入 5 条摘要，共 2,000 个 UTF-16 代码单元，并附 Org ID 供读取正文。[Pi 扩展](../packages/pi/index.ts) · [DSH 插件](../packages/dsh/index.js)
+- **文件名。** 新记忆使用 `YYYYMMDDTHHMMSSZ-<12 位哈希>-<ID 后缀>.org`。时间戳为 UTC，短哈希包含记忆内容、服务来源和请求标识，以区分同一秒内的独立写入。重试和更新沿用已有文件名，旧格式 `<Org ID>.org` 也可以继续使用。
+- **召回。** Emacs 统一选择检索后端。启用 qmd 后，记忆搜索与普通 Wiki 搜索共用索引和后端设置。Emacs 只接受当前项目及个人目录中的记忆，验证原始 Org 记录后按 qmd 排名返回。qmd 关闭、失败或没有可用结果时，Emacs 在同一范围内做文字匹配。
 - **并发修改。** 读取结果带内容版本。纠正和遗忘都要提交 `expected_revision`。若用户已在 Emacs 保存了新内容，旧版本会触发冲突，调用方应重读后再修改。未保存编辑也会阻止覆盖。后端在文件锁内原子替换文件，纠正时保留原始来源并记录最后编辑者。
-- **遗忘与故障。** 遗忘会用包含遗忘操作指纹和创建键的标记替换记录内容，后续搜索和按 ID 读取都无法取回正文。此前注入宿主会话的摘要和用户备份按各自的保留策略处理。Emacs 离线时，原生插件跳过首轮摘要，显式工具调用返回错误。后续调用会重新连接。
+- **遗忘与故障。** 遗忘会用包含遗忘操作指纹和创建键的标记替换记录内容，后续搜索和按 ID 读取都无法取回正文。此前注入宿主会话的摘要和用户备份按各自的保留策略处理。Emacs 离线时，客户端需待其恢复后重连。
 
 ### 由 Org 生成记忆文件 ID
 
 `org_memory_remember` 在首次创建时让 Emacs 生成文件级 `:ID:`。工具返回的 `id` 和指向该记忆的 `[[id:…]]` 使用这个值。文件头另存 `MEMORY_CREATE_KEY`，用于识别同一创建请求。[写入实现](../org-wiki-memory.el)
 
 1. **生成和登记。** Emacs 在准备写入的 Org 缓冲区移到文件开头，调用 `(org-id-get-create)`。该函数遵循 `org-id-method` 和 `org-id-prefix`，默认生成 UUID。文件原子写入成功后，Emacs 才向 Org 登记最终路径，并在 Org-roam 索引可用时刷新反链。修订沿用原 ID。[Org 函数定义](https://github.com/bzg/org-mode/blob/main/lisp/org-id.el)
-2. **识别重试。** Emacs 用项目、范围、宿主、会话和请求标识计算创建键，先按键加锁，再在目标目录查找已有记录或遗忘标记。当前版本仍对应原请求时，重试直接返回已保存的 ID 和版本。同一个创建键提交了不同内容，或原记录已经修订时，返回 `request_conflict`。已遗忘的记忆返回 `unknown_id`。修订保留创建键，遗忘标记同时保留创建键和遗忘操作指纹。
+2. **识别重试。** Emacs 用项目、范围、服务来源和请求标识计算创建键，先按键加锁，再在目标目录查找已有记录或遗忘标记。当前版本仍对应原请求时，重试直接返回已保存的 ID 和版本。同一个创建键提交了不同内容，或原记录已经修订时，返回 `request_conflict`。已遗忘的记忆返回 `unknown_id`。修订保留创建键，遗忘标记同时保留创建键和遗忘操作指纹。
 3. **处理 ID 碰撞。** 新建时，Emacs 按生成的 ID 加锁，在各记忆目录中检查文件名，并核对 Org 或 Org-roam 已登记的节点。若 ID 已被占用，返回 `id_conflict`。这也适用于两个项目同时使用只精确到秒的自定义时间戳。锁正被占用时，重试方会收到 `busy`。
 4. **确定文件名。** UUID 直接用作后缀。后端也保留可直接用于文件名的自定义 ID。对于包含路径分隔符等特殊字符或超过 200 字节的 ID，文件名使用 `!` 加该 ID 的 SHA-256，文件内和链接中仍使用完整的 Org ID。读取、更新和遗忘按 ID 在当前项目和个人目录内核对记录。
 
@@ -59,7 +41,7 @@ flowchart LR
 
 ### 更新、遗忘与索引故障
 
-关系和记忆正文在同一次原子写入中保存。只要记忆文件属于 Org-roam 的索引范围且数据库可用，写入后 Emacs 就调用 `org-roam-db-update-file` 刷新该文件。共享客户端给新建、更新和搜索的 MCP 调用各留出 60 秒，读取和遗忘的调用超时为 5 秒。[共享客户端](../packages/client/index.js)
+关系和记忆正文在同一次原子写入中保存。只要记忆文件属于 Org-roam 的索引范围且数据库可用，写入后 Emacs 就调用 `org-roam-db-update-file` 刷新该文件。
 
 | 情况 | 文件和反链的结果 |
 | --- | --- |
@@ -72,4 +54,14 @@ flowchart LR
 
 ERT 测试在临时库中验证 UUID 与自定义时间戳、长 ID 和文件名编码、请求重试、跨项目 ID 碰撞、写入失败后的重试，以及修订后打开旧链接。测试也覆盖项目隔离、个人共享、版本冲突、未保存编辑和遗忘。自动建链用临时 Org-roam 数据库验证显式 ID 与别名的顺序、同名消歧、过期索引、旧文件 ID、离线保留关系和反链刷新重试。[后端测试](../org-wiki-memory-test.el)
 
-跨宿主测试在临时 Emacs 中让 Pi 保存含 `make check` 的记忆，断言它命中以该命令为别名的节点，再用 DSH 读回同一组 `related_ids`。测试也覆盖 DSH 召回并纠正、Pi 读回新值，以及另一个项目按原 ID 读取时得到 `unknown_id`。[跨宿主测试](../tests/host.test.mjs) · [接入指南与验证命令](agent-memory.md#验证与回退)
+集成测试用上游脚本连接临时 Emacs，验证三个并存项目服务的工具发现、五项操作、worktree 对旧记忆的访问、项目隔离、个人共享、重试、版本冲突和显式清空字段。[stdio 测试](../tests/memory_stdio.py) · [验证命令](agent-memory.md#验证与回退)
+
+## 历史部署与个人配置迁移
+
+以下提交记录旧 Node 客户端的部署。切换到 Elisp 入口时，个人 Emacs 配置需显式注册项目，dotfiles 中的客户端启动命令需改为上游脚本。
+
+个人 Emacs 的 Twist 锁和 dotfiles 的 MCP 客户端都使用 `org-wiki` 提交 `92484d1`。更新这组版本时，按依赖顺序推送，每一步都从 GitHub 核对源码哈希，再发布引用它的配置。
+
+1. **先发布 org-wiki。** 将实现推送到 `feat/qmd-search`，用 `nix flake prefetch --json github:klchen0112/org-wiki/<提交>` 读取该提交的 `rev`、`lastModified` 和 NAR 哈希。[本次固定的 org-wiki 源码](https://github.com/klchen0112/org-wiki/commit/92484d1d4fbfb410756f6c31bf10928bf482992b)
+2. **再发布 Emacs 配置。** 在 `~/my/.emacs.d/nix/twist/lock/flake.lock` 更新 `org-wiki` 节点。Emacs 启动时仍由 `org-wiki-memory-enable` 注册服务，文件 ID 遵循用户的 Org 设置。推送配置提交，再用同一命令从 `github:klchen0112/.emacs.d/<提交>` 核对哈希。[本次 Emacs 配置提交](https://github.com/klchen0112/.emacs.d/commit/17ff99c1f5cecafa2d36a0c9f182d4f0c467eff0)
+3. **最后更新 dotfiles。** `pkgs/by-name/org-wiki-memory/package.nix` 固定与 Twist 相同的 org-wiki 提交和哈希。`flake.lock` 的 `emacs-config` 节点固定包含新 Twist 锁的 Emacs 配置。本次对应的 dotfiles 提交为 `63053d0b`。可在临时 Org 库中用打包后的客户端保存记忆、重试同一请求，再通过 MCP 按返回的 ID 读回。

@@ -1,6 +1,0 @@
-{
-  "name": "org-wiki-memory-workspace",
-  "private": true,
-  "workspaces": ["packages/*"],
-  "scripts": { "test": "node --test tests/*.test.mjs" }
-}

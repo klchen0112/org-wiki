@@ -38,18 +38,18 @@
             }
           );
 
-          # The nixpkgs MELPA snapshot predates the
-          # mcp-server-lib-register-server API (0.4.0) that both the
-          # user's live config and org-wiki-mcp.el use; pin the same
-          # upstream commit the user runs.
-          mcp-server-lib = emacsPackages.mcp-server-lib.overrideAttrs (_old: {
-            version = "0.4.0-unstable-2026-06-10";
+          # Pin typed tool schema support used by the Elisp memory server.
+          mcp-server-lib = emacsPackages.mcp-server-lib.overrideAttrs (old: {
+            version = "0.5.0";
             src = pkgs.fetchFromGitHub {
               owner = "laurynas-biveinis";
               repo = "mcp-server-lib.el";
-              rev = "2bb738efc39bf6bd01fa955590500eab890c37ba";
-              hash = "sha256-WU/UZpfBMxkSd/dcDRwXkhNnPmBVaBblFWjCI4/c/Zw=";
+              rev = "e93ef3a2c0b9d4e965321608f2b1c19ea655bb52";
+              hash = "sha256-sz72k5bSedLweaX8rkP/BPttdsWCmOJY+jRT9A8JUEg=";
             };
+            postPatch = (old.postPatch or "") + ''
+              patchShebangs emacs-mcp-stdio.sh
+            '';
           });
 
           runtimeDeps =
@@ -106,6 +106,7 @@
               ./org-wiki-gptel-test.el
               ./org-wiki-qmd-test.el
               ./org-wiki-memory-test.el
+              ./tests/memory_stdio.py
               ./Makefile
               ./flake.nix
               ./scripts
@@ -157,8 +158,8 @@
             packages = [
               emacsForDev
               pkgs.eask-cli
-              pkgs.nodejs_24
               pkgs.gitMinimal
+              pkgs.python3
               pkgs.gnumake
               pkgs.lefthook
               pkgs.shfmt
@@ -171,6 +172,10 @@
             build = org-wiki;
             compile = mkMakeCheck "compile" "build" [ ];
             tests = mkMakeCheck "tests" "test" [ ];
+            memory-stdio = mkMakeCheck "memory-stdio" "test-memory-stdio" [
+              pkgs.gitMinimal
+              pkgs.python3
+            ];
             lint = mkMakeCheck "lint" "lint" [ ];
             format = mkMakeCheck "format" "format-check" [
               pkgs.nixfmt

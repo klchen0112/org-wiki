@@ -5,7 +5,7 @@
 ;; Author: John Wiegley <johnw@gnu.org>
 ;; Created: 14 May 2026
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (org "9.6") (org-roam "2.2") (org-ql "0.7") (mcp-server-lib "0.4"))
+;; Package-Requires: ((emacs "29.1") (org "9.6") (org-roam "2.2") (org-ql "0.7") (mcp-server-lib "0.5"))
 ;; Keywords: outlines hypermedia
 ;; URL: https://github.com/jwiegley/dot-emacs
 

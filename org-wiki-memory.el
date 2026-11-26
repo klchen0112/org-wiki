@@ -2,8 +2,7 @@
 
 ;;; Commentary:
 
-;; Durable, scoped Org records for local agent hosts.  The host supplies
-;; the canonical workspace and session.  No index is needed to read a write.
+;; Durable Org records scoped to the workspace registered for each MCP server.
 
 ;;; Code:
 
@@ -118,13 +117,8 @@ Set to zero to disable automatic links on new and revised memories."
              (file-directory-p root) (equal root (file-truename root))
              (stringp path) (not (file-name-absolute-p path))
              (not (string-match-p "[[:cntrl:]]" path)))
-    (let* ((default-directory (file-name-as-directory root))
-           (script (expand-file-name path root))
-           (project (if (not (file-exists-p (expand-file-name ".git" root))) root
-                      (with-temp-buffer
-                        (when (zerop (process-file "git" nil t nil "rev-parse"
-                                                   "--path-format=absolute" "--git-common-dir"))
-                          (file-truename (string-trim-right (buffer-string))))))))
+    (let ((script (expand-file-name path root))
+          (project (ignore-errors (org-wiki-memory--project root))))
       (when (and project
                  (equal (directory-file-name (file-name-directory file))
                         (org-wiki-memory--directory (secure-hash 'sha256 project)))
@@ -619,31 +613,211 @@ SOURCE, REQUEST and WORKSPACE describe the current tool call."
                            "personal" "project")
                op args source request (alist-get 'workspace ctx)))))))))
 
-(defun org-wiki-memory--dispatch (operation context arguments)
-  "Dispatch OPERATION with JSON host CONTEXT and JSON ARGUMENTS.
+(defvar org-wiki-memory--bindings (make-hash-table :test #'eq :weakness 'key)
+  "Map live MCP tool registries to their project contexts.
+Unregistering the server releases its registry, so reusing its ID is safe.")
+
+(defun org-wiki-memory--binding (server-id)
+  "Return the project context for the active registration of SERVER-ID."
+  (gethash (gethash server-id mcp-server-lib--tools) org-wiki-memory--bindings))
+
+(defvar org-wiki-memory--context nil
+  "Project context dynamically bound for one MCP request.")
+
+(defun org-wiki-memory--with-project (process message server-id)
+  "Call PROCESS with MESSAGE and SERVER-ID in its registered project."
+  (let ((org-wiki-memory--context (org-wiki-memory--binding server-id)))
+    ;; The bridge supplies the server ID here.  Tool handlers only receive
+    ;; business arguments.  Preserve explicit JSON null for nullable updates.
+    (let ((json-null (if org-wiki-memory--context :null json-null)))
+      (funcall process message server-id))))
+
+(defun org-wiki-memory--invoke (operation args &optional request-key)
+  "Execute OPERATION with ARGS and optional write REQUEST-KEY."
+  (org-wiki-mcp--with-error-handling
+    (unless org-wiki-memory--context (error "Missing memory project binding"))
+    (let ((context org-wiki-memory--context)
+          (json-null nil))
+      (unless (member operation '("read" "search"))
+        (push (cons 'request (or request-key (org-id-uuid))) context))
+      (setq args (seq-filter #'cdr args))
+      (dolist (field args)
+        (pcase-let ((`(,key . ,value) field))
+          (when (or (and (eq value :null)
+                         (not (and (equal operation "update") (memq key '(kind script_path)))))
+                    (and (eq key 'include_script) (not (memq value '(t :json-false)))))
+            (signal 'org-wiki-error (list :invalid_field key)))))
+      (json-encode (org-wiki-memory--call operation context args)))))
+
+(defun org-wiki-memory--tool-remember (title summary body category &optional scope kind script_path request_key)
+  "Save a project decision, fact, preference or reusable lesson.
+Supply TITLE, SUMMARY, BODY and CATEGORY.  SCOPE defaults to project.
+KIND marks a conclusion, SCRIPT_PATH links evidence, and REQUEST_KEY
+identifies retries.
 
 MCP Parameters:
-  operation - memory operation name.
-  context - JSON host context with project and session identity.
-  arguments - JSON operation arguments."
-  (org-wiki-mcp--with-error-handling
-    (json-encode (org-wiki-memory--call operation
-                                        (json-parse-string context :object-type 'alist)
-                                        (json-parse-string arguments :object-type 'alist)))))
+  title - Short title.
+  summary - One conclusion or observation.
+  body - Evidence, commands or details.
+  category - Category of the memory.
+  scope - Project (default) or explicitly personal.
+  kind - Summary mark or Memory for an observation.
+  script_path - Verified script path relative to the project root.
+  request_key - Unique key to reuse when retrying the same write."
+  (org-wiki-memory--invoke "remember"
+                           `((title . ,title)
+                             (summary . ,summary)
+                             (body . ,body)
+                             (category . ,category)
+                             (scope . ,scope)
+                             (kind . ,kind)
+                             (script_path . ,script_path)) request_key))
 
-(defvar org-wiki-memory--enabled nil)
+(defun org-wiki-memory--tool-search (&optional query category kind situation limit)
+  "Search visible project and personal memories by query, category or kind.
+Search by QUERY, CATEGORY or KIND.  SITUATION ranks hits up to LIMIT.
+
+MCP Parameters:
+  query - Search terms.
+  category - Category of the memory.
+  kind - Summary mark or Memory for an observation.
+  situation - Prefer explanations, design criteria or implementation steps.
+  limit - Maximum number of results (default 5)."
+  (org-wiki-memory--invoke "search"
+                           `((query . ,query)
+                             (category . ,category)
+                             (kind . ,kind)
+                             (situation . ,situation)
+                             (limit . ,limit))))
+
+(defun org-wiki-memory--tool-read (id &optional include_script)
+  "Read a memory by Org ID.
+Set INCLUDE_SCRIPT to read the referenced project script.
+
+MCP Parameters:
+  id - Org ID returned by a memory tool.
+  include_script - Include the current contents of the referenced script."
+  (org-wiki-memory--invoke "read"
+                           `((id . ,id)
+                             (include_script . ,include_script))))
+
+(defun org-wiki-memory--tool-update (id expected_revision title summary body category &optional kind script_path request_key)
+  "Revise a memory using its current revision.
+For ID and EXPECTED_REVISION, supply TITLE, SUMMARY, BODY and CATEGORY.
+KIND and SCRIPT_PATH retain their values when omitted.  Reuse REQUEST_KEY
+when retrying.
+
+MCP Parameters:
+  id - Org ID returned by a memory tool.
+  expected_revision - Content version returned by the last read.
+  title - Short title.
+  summary - One conclusion or observation.
+  body - Evidence, commands or details.
+  category - Category of the memory.
+  kind - Summary mark or Memory for an observation.  Pass null to clear.
+  script_path - Project-relative script path.  Pass null to clear.
+  request_key - Unique key to reuse when retrying the same write."
+  (org-wiki-memory--invoke "update"
+                           `((id . ,id)
+                             (expected_revision . ,expected_revision)
+                             (title . ,title)
+                             (summary . ,summary)
+                             (body . ,body)
+                             (category . ,category)
+                             (kind . ,kind)
+                             (script_path . ,script_path)) request_key))
+
+(defun org-wiki-memory--tool-forget (id expected_revision &optional request_key)
+  "Forget a memory using its current revision.
+Supply ID and EXPECTED_REVISION.  Reuse REQUEST_KEY when retrying.
+
+MCP Parameters:
+  id - Org ID returned by a memory tool.
+  expected_revision - Content version returned by the last read.
+  request_key - Unique key to reuse when retrying the same write."
+  (org-wiki-memory--invoke "forget"
+                           `((id . ,id)
+                             (expected_revision . ,expected_revision)) request_key))
+
+(defconst org-wiki-memory--schemas
+  '(("title" (type . "string") (minLength . 1) (maxLength . 500))
+    ("summary" (type . "string") (minLength . 1) (maxLength . 500))
+    ("body" (type . "string") (minLength . 1) (maxLength . 16000))
+    ("category" (type . "string") (enum . ["preference" "decision" "lesson" "fact"]))
+    ("kind" (type . "string") (enum . ["道" "法" "术" "Memory"]))
+    ("scope" (type . "string") (enum . ["project" "personal"]))
+    ("limit" (type . "integer") (minimum . 1) (maximum . 50))
+    ("situation" (type . "string") (enum . ["understand" "design" "implement"]))
+    ("include_script" (type . "boolean"))
+    ("query" (type . "string") (minLength . 1) (maxLength . 16000))
+    ("id" (type . "string") (minLength . 1))
+    ("expected_revision" (type . "string") (minLength . 1) (maxLength . 500))
+    ("request_key" (type . "string") (minLength . 1) (maxLength . 500))
+    ("script_path" (type . "string") (minLength . 1) (maxLength . 500)))
+  "Input schema fragments shared by memory tool registrations.")
+
+(defun org-wiki-memory--tool-spec (handler name description)
+  "Build the MCP registration for HANDLER with NAME and DESCRIPTION."
+  (let ((schemas nil))
+    (dolist (arg (help-function-arglist handler t))
+      (unless (eq arg '&optional)
+        (let* ((key (symbol-name arg))
+               (schema (cdr (assoc key org-wiki-memory--schemas))))
+          (when (and (equal name "update") (memq arg '(kind script_path)))
+            (setq schema `((anyOf . [,schema ((type . "null"))]))))
+          (push (cons key schema) schemas))))
+    (list handler :id (concat "org_memory_" name) :description description
+          :read-only (and (member name '("search" "read")) t)
+          :param-schemas (nreverse schemas))))
+
+(defun org-wiki-memory--project (workspace)
+  "Return the canonical Git common directory or ordinary WORKSPACE."
+  (if (not (executable-find "git")) workspace
+    (let ((default-directory (file-name-as-directory workspace))
+          (process-environment (cons "LC_ALL=C" process-environment)))
+      (with-temp-buffer
+        (let ((status (process-file "git" nil '(t t) nil "rev-parse"
+                                    "--path-format=absolute" "--git-common-dir")))
+          (cond ((equal status 0)
+                 (file-truename (string-remove-suffix "\n" (buffer-string))))
+                ((and (equal status 128) (string-search "not a git repository" (buffer-string)))
+                 workspace)
+                (t (error "Cannot resolve Git project: %s" (string-trim (buffer-string))))))))))
 
 ;;;###autoload
-(defun org-wiki-memory-enable ()
-  "Register the local agent memory endpoint once in this Emacs."
-  (interactive)
-  (unless mcp-server-lib--running (mcp-server-lib-start))
-  (unless org-wiki-memory--enabled
-    (mcp-server-lib-register-server
-     :id "org-wiki-memory"
-     :tools '((org-wiki-memory--dispatch :id "org_memory_dispatch"
-                                         :description "Scoped calls from local memory adapters.")))
-    (setq org-wiki-memory--enabled t)))
+(defun org-wiki-memory-enable (server-id workspace)
+  "Register memory tools for local WORKSPACE under MCP SERVER-ID.
+Repeating the same binding is safe.  Use a distinct ID for each workspace."
+  (interactive "sMemory server ID: \nDProject workspace: ")
+  (unless (and (stringp server-id) (string-match-p "\\`[A-Za-z0-9_-]+\\'" server-id))
+    (user-error "Use letters, digits, hyphens or underscores in the server ID"))
+  (unless (and (file-name-absolute-p workspace) (not (file-remote-p workspace))
+               (file-directory-p workspace))
+    (user-error "Choose an existing local workspace directory"))
+  (let* ((path (directory-file-name (file-truename workspace)))
+         (context `((workspace . ,path) (project . ,(org-wiki-memory--project path))
+                    (host . "mcp") (session . ,server-id))))
+    (unless mcp-server-lib--running (mcp-server-lib-start))
+    (if (mcp-server-lib-server-registered-p server-id)
+        (unless (equal context (org-wiki-memory--binding server-id))
+          (user-error "MCP server ID %s is already in use" server-id))
+      (mcp-server-lib-register-server
+       :id server-id
+       :tools (mapcar (lambda (spec) (apply #'org-wiki-memory--tool-spec spec))
+                      '((org-wiki-memory--tool-remember "remember" "Save an established decision, fact, preference or reusable lesson. Use personal scope for cross-project preferences. Record one conclusion per memory.")
+                        (org-wiki-memory--tool-search "search" "Search by topic, category or kind. Set situation to prefer results for understanding, design or implementation.")
+                        (org-wiki-memory--tool-read "read" "Read a memory by Org ID.")
+                        (org-wiki-memory--tool-update "update" "Revise a memory using its current revision. Omit kind or script_path to keep it, or pass null to clear.")
+                        (org-wiki-memory--tool-forget "forget" "Forget a memory using its current revision."))))
+      ;; Upstream rejects unknown arguments, but 0.5 omits that constraint
+      ;; from its generated object schema.  Publish it for this registry.
+      (let ((tools (gethash server-id mcp-server-lib--tools)))
+        (maphash (lambda (_name tool)
+                   (setf (alist-get 'additionalProperties (plist-get tool :schema)) :json-false))
+                 tools)
+        (puthash tools context org-wiki-memory--bindings))
+      (advice-add 'mcp-server-lib-process-jsonrpc :around #'org-wiki-memory--with-project))))
+
 
 (provide 'org-wiki-memory)
 ;;; org-wiki-memory.el ends here

@@ -462,5 +462,28 @@
      (let ((rows (org-wiki-memory--call "search" ctx '((query . "孤立观察") (situation . "design")))))
        (should (equal (plist-get (aref rows 0) :kind) "Memory"))))))
 
+(ert-deftest org-wiki-memory-server-binding ()
+  "A repeated setup owns one registration and cannot switch its project."
+  (org-wiki-qmd-test--fixture
+   (let ((id "memory-ert")
+         (org-wiki-memory--bindings (make-hash-table :test #'eq))
+         (mcp-server-lib--running t))
+     (should-error (org-wiki-memory-enable id "relative") :type 'user-error)
+     (should-error (org-wiki-memory-enable "invalid/id" base) :type 'user-error)
+     (unwind-protect
+         (progn
+           (org-wiki-memory-enable id base)
+           (org-wiki-memory-enable id (file-name-as-directory base))
+           (should-error (org-wiki-memory-enable id org-wiki-root) :type 'user-error)
+           (should (equal (org-wiki-memory--project base)
+                          (alist-get 'project (org-wiki-memory--binding id))))
+           (mcp-server-lib-unregister-server id)
+           (mcp-server-lib-register-server :id id)
+           (should-not (org-wiki-memory--binding id))
+           (should-error (org-wiki-memory-enable id base) :type 'user-error))
+       (when (mcp-server-lib-server-registered-p id)
+         (mcp-server-lib-unregister-server id)))
+     (should-not (mcp-server-lib-server-registered-p id)))))
+
 (provide 'org-wiki-memory-test)
 ;;; org-wiki-memory-test.el ends here

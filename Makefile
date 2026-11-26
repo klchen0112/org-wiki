@@ -30,6 +30,10 @@ test:
 	$(BATCH) $(addprefix -l ,$(PKG_FILES)) $(addprefix -l ,$(TEST_FILES)) \
 	  -f ert-run-tests-batch-and-exit
 
+.PHONY: test-memory-stdio
+test-memory-stdio: build
+	python3 tests/memory_stdio.py
+
 # Optional real CLI contract checks.  Neither target is part of offline check.
 .PHONY: test-qmd-integration test-qmd-semantic
 test-qmd-integration:
@@ -128,7 +132,7 @@ fuzz:
 # --- Aggregate gate (mirrors lefthook / nix flake check) -------------
 
 .PHONY: check
-check: build test lint format-check coverage-check bench-check fuzz
+check: build test test-memory-stdio lint format-check coverage-check bench-check fuzz
 
 # --- Housekeeping ----------------------------------------------------
 

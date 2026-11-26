@@ -21,7 +21,7 @@
 (depends-on "org"   "9.6")
 (depends-on "org-roam" "2.2")
 (depends-on "org-ql" "0.7")
-(depends-on "mcp-server-lib" "0.4")
+(depends-on "mcp-server-lib" "0.5")
 
 (development
  (depends-on "ert")

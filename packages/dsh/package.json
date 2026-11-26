@@ -1,9 +1,0 @@
-{
-  "name": "dsh-org-wiki-memory",
-  "version": "0.1.0",
-  "type": "module",
-  "main": "./index.js",
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
-  "peerDependencies": { "@deepseek-ai/dsh-llm": "0.2.1-rc.3" },
-  "dependencies": { "org-wiki-memory-client": "0.1.0" }
-}
