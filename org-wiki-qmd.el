@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2026 John Wiegley
 ;; Author: John Wiegley <johnw@gnu.org>
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Keywords: outlines, tools
 ;; URL: https://github.com/jwiegley/dot-emacs
 

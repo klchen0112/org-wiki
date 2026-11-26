@@ -116,7 +116,7 @@
 
           org-wiki = emacsPackages.trivialBuild {
             pname = "org-wiki";
-            version = "0.1.0";
+            version = "0.2.0";
             src = packageSrc;
             packageRequires = runtimeDeps emacsPackages;
             meta = {
